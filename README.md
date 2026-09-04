@@ -389,10 +389,27 @@ never actually reset. With that fixed, RT-11 boots to the `.` prompt, the DDR
 bridge serves the full 4 MB (read and write), and PetaLinux boots alongside from
 the ext4 rootfs with the DDR carve-out reserved.
 
-The 8x8 WS2812 panel on T11 is a front-panel display: row 0 is status (RUN,
-clock, fetch, read, write, I/O, DMA, heartbeat), rows 1–3 the address register,
-4–5 data, 6–7 the PC. It snapshots at 4 Hz with a 1 Hz heartbeat. The CJMCU-64
-is row-major, so the chain-to-pixel map is the identity.
+The 8x8 WS2812 panel on T11 (`front_panel.vhd`) is a front-panel display,
+CJMCU-64, row-major so the chain-to-pixel map is the identity. It snapshots
+onto the LEDs at 4 Hz (any activity since the last snapshot stays lit for
+that whole ~250ms tick, so single-cycle events are still visible), col 0 is
+the MSB of whatever that row shows:
+
+| Row(s) | Shows | Colour |
+|---|---|---|
+| 0, col 0 | RUN vs in-reset | green = running, red = held in reset |
+| 0, col 1 | cpuclk toggling | green = alive, red = not (the exact signal that caught the CPU-never-reset bug during bring-up) |
+| 0, col 2 | ifetch happened | blue, off if not |
+| 0, col 3 | memory read happened | green, off if not |
+| 0, col 4 | memory write happened | red, off if not |
+| 0, col 5 | I/O-page access (dev read or write) | cyan, off if neither |
+| 0, col 6 | disk DMA | amber = RL11/RL02, magenta = RH11/RP06, off if neither |
+| 0, col 7 | panel heartbeat | white, blinks at 1 Hz - if this isn't blinking, clk50mhz itself is dead |
+| 1–3 | 22-bit unibus ADDRESS register | amber, MSB first |
+| 4–5 | 16-bit DATA register (last write, else last read) | green |
+| 6–7 | 16-bit PC, latched at each ifetch | blue |
+
+![8x8 NeoPixel panel layout](docs/panel-diagram.svg)
 
 ![The Bajie board with the NeoPixel panel lit up](docs/board-photo.jpg)
 

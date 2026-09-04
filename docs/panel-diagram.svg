@@ -1,0 +1,144 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 420" width="920" height="420" role="img" aria-label="8x8 NeoPixel front panel layout">
+  <style>
+    text { font-family: 'DejaVu Sans Mono','Courier New',monospace; fill: #e8e8e8; }
+    .lbl { font-size: 13px; fill: #9aa1a9; }
+    .idx { font-size: 13px; fill: #9aa1a9; text-anchor: middle; }
+    .hdr { font-size: 15px; font-weight: bold; fill: #e8e8e8; }
+    .sw  { stroke: #3a3f45; stroke-width: 1; }
+  </style>
+  <rect x="0" y="0" width="920" height="420" fill="#14171a"/>
+
+  <text x="20" y="28" class="hdr">8x8 NeoPixel front panel — front_panel.vhd (CJMCU-64, col 0 = left = MSB)</text>
+
+  <!-- grid: 8 cols x 8 rows, cell 34x30, starting at (60,50) -->
+  <!-- row 0: status lights, one colour per meaning -->
+  <g>
+    <rect class="sw" x="60"  y="50" width="34" height="30" rx="3" fill="#2ecc40"/>
+    <rect class="sw" x="102" y="50" width="34" height="30" rx="3" fill="#2ecc40"/>
+    <rect class="sw" x="144" y="50" width="34" height="30" rx="3" fill="#3d7fdc"/>
+    <rect class="sw" x="186" y="50" width="34" height="30" rx="3" fill="#2ecc40"/>
+    <rect class="sw" x="228" y="50" width="34" height="30" rx="3" fill="#ff4136"/>
+    <rect class="sw" x="270" y="50" width="34" height="30" rx="3" fill="#3ddcd0"/>
+    <rect class="sw" x="312" y="50" width="34" height="30" rx="3" fill="#dc9a3d"/>
+    <rect class="sw" x="354" y="50" width="34" height="30" rx="3" fill="#e8e8e8"/>
+  </g>
+  <text x="77"  y="94" class="idx">0</text><text x="119" y="94" class="idx">1</text>
+  <text x="161" y="94" class="idx">2</text><text x="203" y="94" class="idx">3</text>
+  <text x="245" y="94" class="idx">4</text><text x="287" y="94" class="idx">5</text>
+  <text x="329" y="94" class="idx">6</text><text x="371" y="94" class="idx">7</text>
+
+  <!-- rows 1-3: address, amber -->
+  <g>
+    <rect class="sw" x="60"  y="118" width="34" height="30" rx="3" fill="#dc9a3d"/>
+    <rect class="sw" x="102" y="118" width="34" height="30" rx="3" fill="#dc9a3d" opacity="0.85"/>
+    <rect class="sw" x="144" y="118" width="34" height="30" rx="3" fill="#dc9a3d" opacity="0.35"/>
+    <rect class="sw" x="186" y="118" width="34" height="30" rx="3" fill="#dc9a3d"/>
+    <rect class="sw" x="228" y="118" width="34" height="30" rx="3" fill="#dc9a3d" opacity="0.35"/>
+    <rect class="sw" x="270" y="118" width="34" height="30" rx="3" fill="#dc9a3d" opacity="0.85"/>
+    <rect class="sw" x="312" y="118" width="34" height="30" rx="3" fill="#dc9a3d" opacity="0.35"/>
+    <rect class="sw" x="354" y="118" width="34" height="30" rx="3" fill="#dc9a3d"/>
+
+    <rect class="sw" x="60"  y="154" width="34" height="30" rx="3" fill="#dc9a3d" opacity="0.35"/>
+    <rect class="sw" x="102" y="154" width="34" height="30" rx="3" fill="#dc9a3d"/>
+    <rect class="sw" x="144" y="154" width="34" height="30" rx="3" fill="#dc9a3d" opacity="0.85"/>
+    <rect class="sw" x="186" y="154" width="34" height="30" rx="3" fill="#dc9a3d" opacity="0.35"/>
+    <rect class="sw" x="228" y="154" width="34" height="30" rx="3" fill="#dc9a3d"/>
+    <rect class="sw" x="270" y="154" width="34" height="30" rx="3" fill="#dc9a3d" opacity="0.35"/>
+    <rect class="sw" x="312" y="154" width="34" height="30" rx="3" fill="#dc9a3d" opacity="0.85"/>
+    <rect class="sw" x="354" y="154" width="34" height="30" rx="3" fill="#dc9a3d" opacity="0.35"/>
+
+    <rect class="sw" x="60"  y="190" width="34" height="30" rx="3" fill="#dc9a3d" opacity="0.85"/>
+    <rect class="sw" x="102" y="190" width="34" height="30" rx="3" fill="#dc9a3d" opacity="0.35"/>
+    <rect class="sw" x="144" y="190" width="34" height="30" rx="3" fill="#dc9a3d"/>
+    <rect class="sw" x="186" y="190" width="34" height="30" rx="3" fill="#dc9a3d" opacity="0.85"/>
+    <rect class="sw" x="228" y="190" width="34" height="30" rx="3" fill="#dc9a3d" opacity="0.35"/>
+    <rect class="sw" x="270" y="190" width="34" height="30" rx="3" fill="#dc9a3d"/>
+    <rect class="sw" x="312" y="190" width="34" height="30" rx="3" fill="#dc9a3d" opacity="0.85"/>
+    <rect class="sw" x="354" y="190" width="34" height="30" rx="3" fill="#dc9a3d" opacity="0.35"/>
+  </g>
+
+  <!-- rows 4-5: data, green -->
+  <g>
+    <rect class="sw" x="60"  y="234" width="34" height="30" rx="3" fill="#2ecc40" opacity="0.85"/>
+    <rect class="sw" x="102" y="234" width="34" height="30" rx="3" fill="#2ecc40" opacity="0.35"/>
+    <rect class="sw" x="144" y="234" width="34" height="30" rx="3" fill="#2ecc40"/>
+    <rect class="sw" x="186" y="234" width="34" height="30" rx="3" fill="#2ecc40" opacity="0.35"/>
+    <rect class="sw" x="228" y="234" width="34" height="30" rx="3" fill="#2ecc40" opacity="0.85"/>
+    <rect class="sw" x="270" y="234" width="34" height="30" rx="3" fill="#2ecc40" opacity="0.35"/>
+    <rect class="sw" x="312" y="234" width="34" height="30" rx="3" fill="#2ecc40"/>
+    <rect class="sw" x="354" y="234" width="34" height="30" rx="3" fill="#2ecc40" opacity="0.85"/>
+
+    <rect class="sw" x="60"  y="270" width="34" height="30" rx="3" fill="#2ecc40" opacity="0.35"/>
+    <rect class="sw" x="102" y="270" width="34" height="30" rx="3" fill="#2ecc40"/>
+    <rect class="sw" x="144" y="270" width="34" height="30" rx="3" fill="#2ecc40" opacity="0.85"/>
+    <rect class="sw" x="186" y="270" width="34" height="30" rx="3" fill="#2ecc40"/>
+    <rect class="sw" x="228" y="270" width="34" height="30" rx="3" fill="#2ecc40" opacity="0.35"/>
+    <rect class="sw" x="270" y="270" width="34" height="30" rx="3" fill="#2ecc40" opacity="0.85"/>
+    <rect class="sw" x="312" y="270" width="34" height="30" rx="3" fill="#2ecc40" opacity="0.35"/>
+    <rect class="sw" x="354" y="270" width="34" height="30" rx="3" fill="#2ecc40"/>
+  </g>
+
+  <!-- rows 6-7: pc, blue -->
+  <g>
+    <rect class="sw" x="60"  y="314" width="34" height="30" rx="3" fill="#3d7fdc" opacity="0.35"/>
+    <rect class="sw" x="102" y="314" width="34" height="30" rx="3" fill="#3d7fdc" opacity="0.85"/>
+    <rect class="sw" x="144" y="314" width="34" height="30" rx="3" fill="#3d7fdc"/>
+    <rect class="sw" x="186" y="314" width="34" height="30" rx="3" fill="#3d7fdc" opacity="0.35"/>
+    <rect class="sw" x="228" y="314" width="34" height="30" rx="3" fill="#3d7fdc" opacity="0.85"/>
+    <rect class="sw" x="270" y="314" width="34" height="30" rx="3" fill="#3d7fdc"/>
+    <rect class="sw" x="312" y="314" width="34" height="30" rx="3" fill="#3d7fdc" opacity="0.35"/>
+    <rect class="sw" x="354" y="314" width="34" height="30" rx="3" fill="#3d7fdc" opacity="0.85"/>
+
+    <rect class="sw" x="60"  y="350" width="34" height="30" rx="3" fill="#3d7fdc"/>
+    <rect class="sw" x="102" y="350" width="34" height="30" rx="3" fill="#3d7fdc" opacity="0.35"/>
+    <rect class="sw" x="144" y="350" width="34" height="30" rx="3" fill="#3d7fdc" opacity="0.85"/>
+    <rect class="sw" x="186" y="350" width="34" height="30" rx="3" fill="#3d7fdc"/>
+    <rect class="sw" x="228" y="350" width="34" height="30" rx="3" fill="#3d7fdc" opacity="0.35"/>
+    <rect class="sw" x="270" y="350" width="34" height="30" rx="3" fill="#3d7fdc" opacity="0.85"/>
+    <rect class="sw" x="312" y="350" width="34" height="30" rx="3" fill="#3d7fdc"/>
+    <rect class="sw" x="354" y="350" width="34" height="30" rx="3" fill="#3d7fdc" opacity="0.35"/>
+  </g>
+
+  <!-- row-group labels, short enough to clear the legend column at x=580 -->
+  <text x="410" y="70"  class="lbl">row 0: status (key →)</text>
+  <text x="410" y="163" class="lbl">rows 1-3: ADDRESS</text>
+  <text x="410" y="257" class="lbl">rows 4-5: DATA</text>
+  <text x="410" y="337" class="lbl">rows 6-7: PC</text>
+  <text x="410" y="353" class="lbl">(latched @ ifetch)</text>
+
+  <!-- legend: row 0 status columns -->
+  <g>
+    <text x="580" y="46" class="hdr" font-size="14">row 0, col by col</text>
+
+    <rect x="580" y="56"  width="14" height="14" fill="#2ecc40"/>
+    <text x="602" y="67" class="lbl">0  RUN (red = in reset)</text>
+
+    <rect x="580" y="76"  width="14" height="14" fill="#2ecc40"/>
+    <text x="602" y="87" class="lbl">1  cpuclk toggling (red=not)</text>
+
+    <rect x="580" y="96"  width="14" height="14" fill="#3d7fdc"/>
+    <text x="602" y="107" class="lbl">2  ifetch happened</text>
+
+    <rect x="580" y="116" width="14" height="14" fill="#2ecc40"/>
+    <text x="602" y="127" class="lbl">3  memory read happened</text>
+
+    <rect x="580" y="136" width="14" height="14" fill="#ff4136"/>
+    <text x="602" y="147" class="lbl">4  memory write happened</text>
+
+    <rect x="580" y="156" width="14" height="14" fill="#3ddcd0"/>
+    <text x="602" y="167" class="lbl">5  I/O-page access</text>
+
+    <rect x="580" y="176" width="7"  height="14" fill="#dc9a3d"/>
+    <rect x="587" y="176" width="7"  height="14" fill="#c23dd6"/>
+    <text x="602" y="187" class="lbl">6  DMA: amber=RL, magenta=RH</text>
+
+    <rect x="580" y="196" width="14" height="14" fill="#e8e8e8"/>
+    <text x="602" y="207" class="lbl">7  heartbeat, 1 Hz blink</text>
+
+    <text x="580" y="240" class="lbl">Dim = bit clear, bright = set.</text>
+    <text x="580" y="256" class="lbl">4 Hz snapshot; row 0 lights</text>
+    <text x="580" y="272" class="lbl">stay on for the whole tick</text>
+    <text x="580" y="288" class="lbl">after any activity, so brief</text>
+    <text x="580" y="304" class="lbl">events still show.</text>
+  </g>
+</svg>
