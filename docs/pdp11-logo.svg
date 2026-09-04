@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 120" width="640" height="120" role="img" aria-label="PDP-11 on Zynq-7010">
+  <rect x="0" y="0" width="640" height="120" rx="10" fill="#14171a"/>
+  <rect x="4" y="4" width="632" height="112" rx="7" fill="none" stroke="#3a3f45" stroke-width="1"/>
+
+  <!-- blinkenlights row, echoing the NeoPixel panel's own row 0 -->
+  <g>
+    <rect x="28" y="30" width="16" height="16" rx="2" fill="#3ddc4a"/>
+    <rect x="56" y="30" width="16" height="16" rx="2" fill="#3d7fdc"/>
+    <rect x="84" y="30" width="16" height="16" rx="2" fill="#3d7fdc"/>
+    <rect x="112" y="30" width="16" height="16" rx="2" fill="#3ddc4a"/>
+    <rect x="140" y="30" width="16" height="16" rx="2" fill="#dc3d3d"/>
+    <rect x="168" y="30" width="16" height="16" rx="2" fill="#3ddcd0"/>
+    <rect x="196" y="30" width="16" height="16" rx="2" fill="#dc9a3d"/>
+    <rect x="224" y="30" width="16" height="16" rx="2" fill="#e8e8e8"/>
+  </g>
+  <g>
+    <rect x="28" y="58" width="16" height="16" rx="2" fill="#dc9a3d" opacity="0.35"/>
+    <rect x="56" y="58" width="16" height="16" rx="2" fill="#dc9a3d" opacity="0.85"/>
+    <rect x="84" y="58" width="16" height="16" rx="2" fill="#dc9a3d" opacity="0.35"/>
+    <rect x="112" y="58" width="16" height="16" rx="2" fill="#dc9a3d" opacity="0.85"/>
+    <rect x="140" y="58" width="16" height="16" rx="2" fill="#dc9a3d" opacity="0.35"/>
+    <rect x="168" y="58" width="16" height="16" rx="2" fill="#dc9a3d" opacity="0.85"/>
+    <rect x="196" y="58" width="16" height="16" rx="2" fill="#dc9a3d" opacity="0.35"/>
+    <rect x="224" y="58" width="16" height="16" rx="2" fill="#dc9a3d" opacity="0.85"/>
+  </g>
+  <g>
+    <rect x="28" y="86" width="16" height="16" rx="2" fill="#c23dd6" opacity="0.85"/>
+    <rect x="56" y="86" width="16" height="16" rx="2" fill="#c23dd6" opacity="0.35"/>
+    <rect x="84" y="86" width="16" height="16" rx="2" fill="#c23dd6" opacity="0.85"/>
+    <rect x="112" y="86" width="16" height="16" rx="2" fill="#c23dd6" opacity="0.35"/>
+    <rect x="140" y="86" width="16" height="16" rx="2" fill="#c23dd6" opacity="0.85"/>
+    <rect x="168" y="86" width="16" height="16" rx="2" fill="#c23dd6" opacity="0.35"/>
+    <rect x="196" y="86" width="16" height="16" rx="2" fill="#c23dd6" opacity="0.85"/>
+    <rect x="224" y="86" width="16" height="16" rx="2" fill="#c23dd6" opacity="0.35"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="270" y="66" font-family="'DejaVu Sans Mono','Courier New',monospace" font-size="40" font-weight="700" fill="#e8e8e8">PDP-11</text>
+  <text x="270" y="92" font-family="'DejaVu Sans Mono','Courier New',monospace" font-size="15" fill="#8a9099">on the Zynq-7010 "Bajie" board</text>
+</svg>

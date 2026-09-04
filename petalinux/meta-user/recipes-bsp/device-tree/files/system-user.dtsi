@@ -1,0 +1,80 @@
+/include/ "system-conf.dtsi"
+/ {
+	/*
+	 * Keep Linux off the top 8 MB of DDR3 (0x1F800000-0x1FFFFFFF): the
+	 * PDP-11 core uses the bottom 4 MB of that window as its main memory
+	 * over S_AXI_HP0 (ddr_base = 0x1F800000). no-map so the kernel never
+	 * maps it at all. Matches ddr_mem.vhd / zynq_top.vhd.
+	 */
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		pdp11ram@1f800000 {
+			no-map;
+			reg = <0x1f800000 0x800000>;
+		};
+	};
+};
+
+/*
+ * Expose the RL disk backend (sddisk.vhd AXI-Lite slave at 0x43000000) as a
+ * UIO device so pdp11-diskd can mmap its registers and take its interrupt.
+ * uio_pdrv_genirq binds on compatible = "generic-uio". The node keeps its
+ * auto-generated interrupt (level-high SPI 32); pdp11-diskd finds the device
+ * by its map address 0x43000000, not by name.
+ */
+&zynq_top_0 {
+	compatible = "generic-uio";
+	linux,uio-name = "pdp11disk";
+};
+
+/*
+ * RESOLVED (2026-09-04, from a live board's generated device tree - see
+ * [[rp06-axi-bridge-diskd]] in memory): the device-tree generator does NOT
+ * make a second node for zynq_top_0's second AXI-Lite slave interface -
+ * both disk_s_axi (RL) and rh_disk_s_axi (RH) land on the SAME &zynq_top_0
+ * node above, which only picked up ONE reg (the RL region, 0x43000000) even
+ * though it correctly captured BOTH interrupts:
+ *
+ *   zynq_top@43000000 {
+ *      compatible = "generic-uio";
+ *      interrupt-parent = <&intc>;
+ *      interrupts = <0 0x20 4>, <0 0x21 4>;   -- disk_irq, rh_disk_irq
+ *      reg = <0x43000000 0x10000>;             -- RL region only
+ *      interrupt-names = "disk_irq", "rh_disk_irq";
+ *      linux,uio-name = "pdp11disk";
+ *   };
+ *
+ * uio_pdrv_genirq only maps the reg region(s) actually present and only
+ * requests interrupts[0] - so the RH region (0x43010000) and its interrupt
+ * (rh_disk_irq) are visible in the DT but never bound to anything. An
+ * &zynq_top_0 override can't fix this (there's no second label - only one
+ * node exists), so this is a genuinely NEW node instead, merged into the
+ * existing /amba_pl by node-name matching (standard dtsi include-merge
+ * behaviour - no &label needed for a new node, just the same path).
+ *
+ * The interrupts cell value below (0 0x21 4) is COPIED VERBATIM from the
+ * live &zynq_top_0 node's own interrupts property (its 2nd triplet,
+ * "rh_disk_irq") rather than computed - the exact SPI-number encoding
+ * Xilinx's generator uses isn't otherwise documented here. If the BD's
+ * IRQ_F2P wiring ever changes (interrupt concat port order/count in
+ * 02_create_bd.tcl), this can go silently stale. To refresh it after a
+ * hardware rebuild, on the booted board:
+ *   dtc -I fs -O dts /sys/firmware/devicetree/base -o /tmp/live.dts
+ *   grep -A10 'zynq_top@43000000' /tmp/live.dts
+ * and take the second 3-cell group of `interrupts`.
+ */
+/ {
+	amba_pl {
+		rh_disk_uio: rh_disk_uio@43010000 {
+			compatible = "generic-uio";
+			reg = <0x43010000 0x10000>;
+			interrupt-parent = <&intc>;
+			interrupts = <0 0x21 4>;
+			linux,uio-name = "pdp11disk-rh";
+		};
+	};
+};
+
