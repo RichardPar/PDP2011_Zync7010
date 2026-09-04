@@ -413,18 +413,6 @@ kernel config, and device-tree overrides live in the PetaLinux project's
 `project-spec/meta-user`, which `build.sh`/`docker/plnx.sh` create and build
 outside this tree (default `../.petalinux-docker/work`, overridable).
 
-## Not done
-
-- **RT-11's `DB:` handler.** RP06 boots 2.11BSD fine over the AXI bridge (see
-  "File-backed RH/RP06 disk" above), but nobody's tried RT-11 reading/writing
-  `DB:` yet — only the boot path and 2.11BSD have exercised the bridge so far.
-- **More than 2 RL units.** DL0/DL1 work; `INIT DL2:`/`DL3:` don't. RT-11's `DL`
-  handler ships built for two units (`DL$UN=2`), and even after patching that to
-  four the core hangs on unit 2/3 — so the SD disk path really only does two.
-- **RT-11 multi-terminal.** `TT1:`–`TT3:` need a monitor SYSGEN'd with
-  multi-terminal support and the extra line CSR/vectors (776500/300, 776510/310,
-  776520/320). The serial paths work; the OS side doesn't service them yet.
-
 ## FP11 floating point
 
 On (`have_fp => 1` in `zynq_top.vhd`). It was forced off on the earlier build
