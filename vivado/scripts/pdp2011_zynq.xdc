@@ -2,9 +2,9 @@
 #
 # Pin numbers as given directly by the user (not yet cross-checked against a
 # vendor schematic/manual in this project - IOSTANDARD LVCMOS33 is an
-# assumption matching this board's other 3.3V-bank pins used in the earlier
-# Zynq attempt's wozmon feature; verify both before trusting the physical
-# link if the console/SD don't come up).
+# assumption matching this board's other 3.3V-bank pins used in an earlier
+# project; verify both before trusting the physical link if the console/SD
+# don't come up).
 
 # PDP-11 console UART (KL11 kl0), 9600 8N1
 set_property PACKAGE_PIN P20 [get_ports uart_tx]

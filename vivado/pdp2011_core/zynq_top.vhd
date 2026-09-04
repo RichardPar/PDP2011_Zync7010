@@ -77,17 +77,17 @@ entity zynq_top is
 
       -- bring-up diagnostics (2026-08 - console produced no output on
       -- first real hardware test; physical link independently confirmed
-      -- good via wozmon on these same pins in an earlier project, so the
-      -- prime suspect is clk50mhz/FCLK1, new and unproven in this design -
-      -- these let it be checked without another blind rebuild cycle)
+      -- good on these same pins in an earlier project, so the prime suspect
+      -- was clk50mhz/FCLK1, new and unproven in this design - these let it
+      -- be checked without another blind rebuild cycle)
       led_n      : out std_logic;                     -- H17, active-low, ~0.75Hz blink driven by clk50mhz
       -- devmem-readable: [0]=clk50mhz alive [1]=cpuclk alive [2]=ifetch
       -- [3]=aresetn [4]=dbg_dev_rd(I/O-page read) [5]=dbg_dev_wr(I/O-page
       -- write) [6]=dbg_dma_wr(RL11 OR RH11 DMA write, ORed) - the last three
-      -- tap unibus.vhd's own pre-existing debug ports (same ones the earlier project's
-      -- wozmon used), added 2026-08 to see whether the CPU reaches ANY
-      -- memory reference at all (ifetch specifically never toggles - is it
-      -- stuck before even that, e.g. looping in NPR/DMA arbitration?)
+      -- tap unibus.vhd's own pre-existing debug ports, added 2026-08 to see
+      -- whether the CPU reaches ANY memory reference at all (ifetch
+      -- specifically never toggled - was it stuck before even that, e.g.
+      -- looping in NPR/DMA arbitration?)
       dbg_status : out std_logic_vector(6 downto 0);
 
       -- 8x8 WS2812 ("NeoPixel") front panel - a PDP-11 "blinkenlights" console.
