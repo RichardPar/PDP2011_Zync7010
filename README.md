@@ -8,6 +8,53 @@
 whole project is built on. Usagi Electric and Dave Plummer on YouTube were the
 spark for wanting a real PDP-11 running again in the first place.
 
+## Building
+
+Everything is built by the top-level **`./build.sh`** — bitstream, then the full
+PetaLinux (kernel, rootfs, `BOOT.BIN`), including the rootfs apps `pdp11-diskd`,
+`tu58fs`, `picocom`, and `pdp11-scripts`. All artifacts land in `deploy/`.
+
+```bash
+# prerequisites (see below), then:
+./build.sh                 # bitstream, then PetaLinux, from scratch
+./build.sh bitstream       # Vivado only
+./build.sh petalinux       # PetaLinux only (needs deploy/*.xsa already)
+```
+
+**Prerequisites**
+
+- **Vivado 2023.2**. If it isn't at `~/Xilinx/Vivado/2023.2`, set `VIVADO=/path/to/Vivado/2023.2`.
+  `build.sh` auto-adds the `libtinfo.so.5` shim Vivado 2023.2 needs on modern
+  distros (no root required).
+- **Docker**, with your user in the `docker` group.
+- The **PetaLinux 2023.2 installer** `.run`. Point to it with
+  `PLNX_INSTALLER=/path/...` or drop it beside/inside the project — `build.sh`
+  finds it. (PetaLinux 2023.2 won't build natively on a modern glibc-2.39 host —
+  its `fakeroot` breaks — so the build runs inside an Ubuntu-22.04 container; see
+  `docker/`.)
+
+The two stages individually:
+
+- **Vivado** — the four TCL scripts in `vivado/scripts/` (create project, block
+  design, constraints, synth/impl/bitstream) → `deploy/pdp2011_zynq.bit` +
+  `pdp2011_zynq_wrapper.xsa`.
+- **PetaLinux** — `docker/plnx.sh {image|install|build}`. Incremental helpers:
+  `rehw` re-imports a new XSA (e.g. after adding PL IP) and rebuilds; `rebuild`
+  builds the existing project; `package` repackages `BOOT.BIN` with a new
+  bitstream and no full rebuild. Paths are overridable via `PLNX_INSTALL` /
+  `PLNX_WORK`. See `docker/README.md`.
+
+### PetaLinux customizations
+
+In `project-spec/meta-user`:
+
+- `system-user.dtsi` — `reserved-memory pdp11ram@1f800000`, `no-map`,
+  `reg = <0x1f800000 0x800000>`.
+- `pdp11-scripts` recipe — installs `pdp11_reset.sh`.
+- `tu58fs` and `picocom` recipes, plus `bsp.cfg` enabling
+  `CONFIG_SERIAL_UARTLITE`.
+- rootfs on the SD's ext4 partition (`root=/dev/mmcblk0p2`), not initrd.
+
 A port of the [pdp2011](https://pdp2011.sytse.net/) VHDL core (PDP-11/44,
 22-bit MMU, RL11 disk on microSD) to a Zynq-7010. Main memory lives in the
 PS's DDR3, shared with a PetaLinux system running on the same chip.
@@ -284,53 +331,6 @@ probe instead (rk error -> `nork`/try rl, rl error -> `norl`/try rp, rp error
 `.mac` source lives next to the compiled `m9312h-pdp2011.vhd`; rebuilding it
 needs upstream's `macro11`/`genblkram` toolchain (from
 `pdp2011.sytse.net`'s download tarball, not vendored in this repo).
-
-## Building
-
-Everything is built by the top-level **`./build.sh`** — bitstream, then the full
-PetaLinux (kernel, rootfs, `BOOT.BIN`), including the rootfs apps `pdp11-diskd`,
-`tu58fs`, `picocom`, and `pdp11-scripts`. All artifacts land in `deploy/`.
-
-```bash
-# prerequisites (see below), then:
-./build.sh                 # bitstream, then PetaLinux, from scratch
-./build.sh bitstream       # Vivado only
-./build.sh petalinux       # PetaLinux only (needs deploy/*.xsa already)
-```
-
-**Prerequisites**
-
-- **Vivado 2023.2**. If it isn't at `~/Xilinx/Vivado/2023.2`, set `VIVADO=/path/to/Vivado/2023.2`.
-  `build.sh` auto-adds the `libtinfo.so.5` shim Vivado 2023.2 needs on modern
-  distros (no root required).
-- **Docker**, with your user in the `docker` group.
-- The **PetaLinux 2023.2 installer** `.run`. Point to it with
-  `PLNX_INSTALLER=/path/...` or drop it beside/inside the project — `build.sh`
-  finds it. (PetaLinux 2023.2 won't build natively on a modern glibc-2.39 host —
-  its `fakeroot` breaks — so the build runs inside an Ubuntu-22.04 container; see
-  `docker/`.)
-
-The two stages individually:
-
-- **Vivado** — the four TCL scripts in `vivado/scripts/` (create project, block
-  design, constraints, synth/impl/bitstream) → `deploy/pdp2011_zynq.bit` +
-  `pdp2011_zynq_wrapper.xsa`.
-- **PetaLinux** — `docker/plnx.sh {image|install|build}`. Incremental helpers:
-  `rehw` re-imports a new XSA (e.g. after adding PL IP) and rebuilds; `rebuild`
-  builds the existing project; `package` repackages `BOOT.BIN` with a new
-  bitstream and no full rebuild. Paths are overridable via `PLNX_INSTALL` /
-  `PLNX_WORK`. See `docker/README.md`.
-
-### PetaLinux customizations
-
-In `project-spec/meta-user`:
-
-- `system-user.dtsi` — `reserved-memory pdp11ram@1f800000`, `no-map`,
-  `reg = <0x1f800000 0x800000>`.
-- `pdp11-scripts` recipe — installs `pdp11_reset.sh`.
-- `tu58fs` and `picocom` recipes, plus `bsp.cfg` enabling
-  `CONFIG_SERIAL_UARTLITE`.
-- rootfs on the SD's ext4 partition (`root=/dev/mmcblk0p2`), not initrd.
 
 ## Deploying
 
