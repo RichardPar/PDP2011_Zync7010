@@ -12,7 +12,25 @@ spark for wanting a real PDP-11 running again in the first place.
 
 Everything is built by the top-level **`./build.sh`** — bitstream, then the full
 PetaLinux (kernel, rootfs, `BOOT.BIN`), including the rootfs apps `pdp11-diskd`,
-`tu58fs`, `picocom`, and `pdp11-scripts`. All artifacts land in `deploy/`.
+`tu58fs`, `picocom`, and `pdp11-scripts`. Every artifact lands flat in `deploy/`:
+
+| File | From |
+|---|---|
+| `pdp2011_zynq.bit` | Vivado bitstream |
+| `pdp2011_zynq_wrapper.xsa` | Vivado hardware handoff (PetaLinux's input) |
+| `BOOT.BIN` | FSBL + `u-boot.elf` + `system.dtb` + the bitstream, bootgen-packaged |
+| `image.ub` | kernel + device tree + ramdisk FIT image |
+| `boot.scr` | u-boot boot script |
+| `rootfs.ext4` / `rootfs.tar.gz` / `rootfs.cpio.gz` | the PetaLinux rootfs, three packagings |
+| `pdp11-diskd` | just the daemon binary, for a fast redeploy (see `build_pdp11_diskd.sh`) |
+
+`BOOT.BIN`/`image.ub`/`boot.scr` go on the boot card's FAT32 partition;
+`rootfs.*` becomes the ext4 partition's contents — see "Deploying" below.
+
+To get them onto the board: `scripts/flash_sd_card.sh` for a fresh card (from
+a reader on this host), or if the board's already up and reachable over the
+network, `scripts/flash_bootbin_net.sh` + `scripts/deploy_petalinux_net.sh`
+update it in place, no card removal needed — see "Deploying" for details.
 
 ```bash
 # prerequisites (see below), then:
@@ -70,6 +88,32 @@ are bridged to Linux over `/dev/ttyUL*` (see "Serial consoles and TU58"
 below). The RL11 disk started on a physical SD (`sdspi.vhd`) and was later
 moved to an image file on the PS served over AXI — see "File-backed RL disk"
 below.
+
+## Deploying
+
+There is a **single SD card** — the PS boot card. Both PDP-11 disks are files
+on the PS now (RL at `/srv/pdp11/dl0.img`/`dl1.img`, RH0/RP06 at
+`/srv/pdp11/db0.img`), so no separate disk card is needed.
+
+The boot card has two partitions: FAT32 (`BOOT.BIN`, `image.ub`, `boot.scr`) and
+ext4 (rootfs). `scripts/flash_sd_card.sh` writes a fresh card. Then place the
+disk images under `/srv/pdp11/` on the rootfs (each RL unit is a 10 MB
+`.dsk`, `db0.img` is ~166 MB); `pdp11-diskd` auto-starts at boot, resets the
+PDP-11, and serves them (see "File-backed RL disk" / "File-backed RH/RP06
+disk"). After the first boot it remembers whatever's loaded where in
+`/srv/pdp11/diskd.conf` — see "Swapping disks without a reboot" — so these are
+just the seed images for a fresh card, not something you keep hand-managing.
+
+The board is normally reachable over the network, so `scripts/`
+has helpers that update a running board in place:
+
+- `flash_bootbin_net.sh` — replace `BOOT.BIN` on the FAT partition.
+- `deploy_petalinux_net.sh` — replace `image.ub`/`boot.scr`.
+- `program_jtag.tcl` — load a bitstream into the PL over JTAG (boot the current
+  SD first so the FSBL brings up the PS clocks and DDR).
+
+`scripts/rl0_boot.sh` deposits an RL bootstrap over ODT to boot the PDP-11 disk
+if it's not set to auto-boot.
 
 ## Memory sharing
 
@@ -331,32 +375,6 @@ probe instead (rk error -> `nork`/try rl, rl error -> `norl`/try rp, rp error
 `.mac` source lives next to the compiled `m9312h-pdp2011.vhd`; rebuilding it
 needs upstream's `macro11`/`genblkram` toolchain (from
 `pdp2011.sytse.net`'s download tarball, not vendored in this repo).
-
-## Deploying
-
-There is a **single SD card** — the PS boot card. Both PDP-11 disks are files
-on the PS now (RL at `/srv/pdp11/dl0.img`/`dl1.img`, RH0/RP06 at
-`/srv/pdp11/db0.img`), so no separate disk card is needed.
-
-The boot card has two partitions: FAT32 (`BOOT.BIN`, `image.ub`, `boot.scr`) and
-ext4 (rootfs). `scripts/flash_sd_card.sh` writes a fresh card. Then place the
-disk images under `/srv/pdp11/` on the rootfs (each RL unit is a 10 MB
-`.dsk`, `db0.img` is ~166 MB); `pdp11-diskd` auto-starts at boot, resets the
-PDP-11, and serves them (see "File-backed RL disk" / "File-backed RH/RP06
-disk"). After the first boot it remembers whatever's loaded where in
-`/srv/pdp11/diskd.conf` — see "Swapping disks without a reboot" — so these are
-just the seed images for a fresh card, not something you keep hand-managing.
-
-The board is normally reachable over the network, so `scripts/`
-has helpers that update a running board in place:
-
-- `flash_bootbin_net.sh` — replace `BOOT.BIN` on the FAT partition.
-- `deploy_petalinux_net.sh` — replace `image.ub`/`boot.scr`.
-- `program_jtag.tcl` — load a bitstream into the PL over JTAG (boot the current
-  SD first so the FSBL brings up the PS clocks and DDR).
-
-`scripts/rl0_boot.sh` deposits an RL bootstrap over ODT to boot the PDP-11 disk
-if it's not set to auto-boot.
 
 ## Bring-up notes
 
