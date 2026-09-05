@@ -15,7 +15,7 @@ REPO="$(cd "$HERE/.." && pwd)"
 BIN="$REPO/deploy/pdp11-diskd"
 LOG=/var/log/pdp11-diskd.log
 
-BOARD=petalinux@192.168.10.192
+BOARD=petalinux@192.168.10.185
 PW=123456
 SSHOPT="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10"
 

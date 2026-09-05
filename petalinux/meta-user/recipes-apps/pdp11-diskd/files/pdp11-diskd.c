@@ -300,7 +300,12 @@ static int load_image(bus_t *b, int unit, const char *path)
 {
     int nf;
     if (unit < 0 || unit >= b->max_units) return -EINVAL;
-    nf = open(path, O_RDWR);
+    /* O_SYNC: every pwrite() in serve_bus() blocks until the sector is on the
+     * SD card. Without it, the page cache can reorder/delay writes across a
+     * reset or power loss, corrupting the image; sector I/O is already
+     * serialized one-at-a-time by img_lock, so the added latency is a single
+     * write's worth, not a pipeline stall. */
+    nf = open(path, O_RDWR | O_SYNC);
     if (nf < 0) return -errno;
     pthread_mutex_lock(&img_lock);
     if (b->imgfd[unit] >= 0) close(b->imgfd[unit]);
