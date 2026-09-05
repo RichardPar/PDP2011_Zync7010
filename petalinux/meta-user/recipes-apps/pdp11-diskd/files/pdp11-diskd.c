@@ -113,6 +113,7 @@ static volatile sig_atomic_t g_stop = 0;
  */
 typedef struct {
    const char *name;               /* "RL" / "RH" - log prefix, JSON key, config prefix */
+   const char *unit_prefix;        /* "DL" / "DB" - per-unit drive letter for logging */
    uint32_t    phys_base;          /* AXI-Lite base addr - matches the UIO map0 addr */
    const char *uio_name;           /* fallback uio name match (device-tree linux,uio-name) */
    int         buf_words;          /* sector buffer words actually moved */
@@ -136,12 +137,14 @@ typedef struct {
 static pthread_mutex_t img_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static bus_t g_rl = {
-   .name = "RL", .phys_base = 0x43000000UL, .uio_name = "pdp11disk",
+   .name = "RL", .unit_prefix = "DL",
+   .phys_base = 0x43000000UL, .uio_name = "pdp11disk",
    .buf_words = 128, .sector_bytes = 256, .max_units = 4,
    .unit_sectors = 40960, .required = 1,
 };
 static bus_t g_rh = {
-   .name = "RH", .phys_base = 0x43010000UL, .uio_name = "pdp11disk-rh",
+   .name = "RH", .unit_prefix = "DB",
+   .phys_base = 0x43010000UL, .uio_name = "pdp11disk-rh",
    .buf_words = 256, .sector_bytes = 512, .max_units = 1,
    .unit_sectors = 0, .required = 0,
 };
@@ -680,6 +683,7 @@ static void *serve_bus(void *arg)
         off_t off;
         int fd, err = 0;
         uint64_t t0 = now_ms();
+        char tag[16];            /* e.g. "DL2" / "DB0" - the actual drive, for logging */
 
         if (g_stop) break;
 
@@ -731,13 +735,14 @@ static void *serve_bus(void *arg)
         }
         off = (off_t)local * b->sector_bytes;
         fd  = -1;                                          /* fetched under img_lock below */
+        snprintf(tag, sizeof(tag), "%s%u", b->unit_prefix, unit);
 
         if (unit == spin_unit && block == spin_block && is_write == spin_is_write) {
             spin_count++;
         } else {
             if (spin_quiet)
                 log_msg("%s:   ...spin ended: unit %u block %u repeated %llu times over %llums",
-                        b->name, spin_unit, spin_block, (unsigned long long)spin_count,
+                        tag, spin_unit, spin_block, (unsigned long long)spin_count,
                         (unsigned long long)(t0 - spin_start_ms));
             spin_unit = unit; spin_block = block; spin_is_write = is_write;
             spin_count = 1; spin_start_ms = t0; spin_last_summary_ms = t0;
@@ -746,18 +751,18 @@ static void *serve_bus(void *arg)
         if (spin_quiet && t0 - spin_last_summary_ms >= SPIN_SUMMARY_MS) {
             log_msg("%s:   ...spinning: unit %u block %u repeated %llu times so far"
                     " (suppressing per-request logs)",
-                    b->name, unit, block, (unsigned long long)spin_count);
+                    tag, unit, block, (unsigned long long)spin_count);
             spin_last_summary_ms = t0;
         }
 
         if (!spin_quiet) {
             log_msg("%s: REQ#%llu %s block %u (unit %u sec %u, offset %llu), STATUS=0x%08x%s",
-                    b->name, (unsigned long long)seq, is_write ? "WRITE" : "READ", block,
+                    tag, (unsigned long long)seq, is_write ? "WRITE" : "READ", block,
                     unit, local, (unsigned long long)off, status,
                     last_req_ms ? "" : ", first request");
             if (last_req_ms)
                 log_msg("%s:   elapsed since last request: %llums",
-                        b->name, (unsigned long long)(t0 - last_req_ms));
+                        tag, (unsigned long long)(t0 - last_req_ms));
         }
         last_req_ms = t0;
 
@@ -765,7 +770,7 @@ static void *serve_bus(void *arg)
             uint32_t sblk = (uint32_t)(seq - 1);
             if (sblk != block)
                 log_msg("%s:   DLFIX: latched block %u, serving block %u (seq-1) instead",
-                        b->name, block, sblk);
+                        tag, block, sblk);
             block = sblk;
             if (b->max_units > 1) {
                 unit  = block / (unsigned)b->unit_sectors;
@@ -775,6 +780,7 @@ static void *serve_bus(void *arg)
                 local = block;
             }
             off   = (off_t)local * b->sector_bytes;
+            snprintf(tag, sizeof(tag), "%s%u", b->unit_prefix, unit);
         }
 
         /* hold img_lock across the whole request I/O so a runtime load/unload
@@ -792,7 +798,7 @@ static void *serve_bus(void *arg)
             /* no file for this unit: fail the request cleanly (RT-11 sees an
              * error / empty read) rather than touching the wrong drive */
             if (!spin_quiet)
-                log_msg("%s:   ERROR: no image for unit %u (block %u) - %s", b->name, unit, block,
+                log_msg("%s:   ERROR: no image for unit %u (block %u) - %s", tag, unit, block,
                         unit < (unsigned)b->max_units ? "unit file not provided" : "unit out of range");
             if (!is_write) for (i = 0; i < b->buf_words; i++) b->regs[i] = 0;
             err = 1;
@@ -802,16 +808,16 @@ static void *serve_bus(void *arg)
                 sector[i] = (uint16_t)(b->regs[i] & 0xFFFF);
             if (verbose) {
                 log_msg("%s:   wsector words 0-7: %04x %04x %04x %04x %04x %04x %04x %04x",
-                        b->name, sector[0], sector[1], sector[2], sector[3],
+                        tag, sector[0], sector[1], sector[2], sector[3],
                         sector[4], sector[5], sector[6], sector[7]);
             }
             if (pwrite(fd, sector, (size_t)b->sector_bytes, off) != (ssize_t)b->sector_bytes) {
                 if (!spin_quiet)
                     log_msg("%s:   ERROR: pwrite offset %llu: %s",
-                            b->name, (unsigned long long)off, strerror(errno));
+                            tag, (unsigned long long)off, strerror(errno));
                 err = 1;
             } else if (!spin_quiet) {
-                log_msg("%s:   pwrite %d bytes @ %llu OK", b->name, b->sector_bytes,
+                log_msg("%s:   pwrite %d bytes @ %llu OK", tag, b->sector_bytes,
                         (unsigned long long)off);
             }
         } else {
@@ -820,22 +826,22 @@ static void *serve_bus(void *arg)
             if (got < 0) {
                 if (!spin_quiet)
                     log_msg("%s:   ERROR: pread offset %llu: %s",
-                            b->name, (unsigned long long)off, strerror(errno));
+                            tag, (unsigned long long)off, strerror(errno));
                 err = 1; got = 0;
             }
             /* zero-fill any short read (past EOF) */
             for (i = (int)(got / 2); i < b->buf_words; i++) sector[i] = 0;
             if (!spin_quiet && (verbose || seq <= 8)) {
                 log_msg("%s:   sector words 0-7: %04x %04x %04x %04x %04x %04x %04x %04x",
-                        b->name, sector[0], sector[1], sector[2], sector[3],
+                        tag, sector[0], sector[1], sector[2], sector[3],
                         sector[4], sector[5], sector[6], sector[7]);
             }
             if (!spin_quiet) {
                 if (got < (ssize_t)b->sector_bytes)
                     log_msg("%s:   short read: got %zd of %d (block past EOF?)",
-                            b->name, got, b->sector_bytes);
+                            tag, got, b->sector_bytes);
                 else
-                    log_msg("%s:   pread %d bytes @ %llu OK", b->name, b->sector_bytes,
+                    log_msg("%s:   pread %d bytes @ %llu OK", tag, b->sector_bytes,
                             (unsigned long long)off);
             }
             if (swap)
@@ -843,12 +849,12 @@ static void *serve_bus(void *arg)
                     sector[i] = (uint16_t)((sector[i] << 8) | (sector[i] >> 8));
             if (!spin_quiet && (verbose || seq <= 8))
                 log_msg("%s:   served words 0-7 (swap=%d): %04x %04x %04x %04x %04x %04x %04x %04x",
-                        b->name, swap, sector[0], sector[1], sector[2], sector[3],
+                        tag, swap, sector[0], sector[1], sector[2], sector[3],
                         sector[4], sector[5], sector[6], sector[7]);
             for (i = 0; i < b->buf_words; i++)
                 b->regs[i] = sector[i];
             if (!spin_quiet)
-                log_msg("%s:   pushed %d words into PL buffer", b->name, b->buf_words);
+                log_msg("%s:   pushed %d words into PL buffer", tag, b->buf_words);
         }
         pthread_mutex_unlock(&img_lock);
 
@@ -858,7 +864,7 @@ static void *serve_bus(void *arg)
         b->regs[REG_DONE] = err ? 1 : 0;
         if (!spin_quiet) {
             uint32_t after = b->regs[REG_STATUS];
-            log_msg("%s:   DONE written (err=%d), STATUS after = 0x%08x", b->name, err, after);
+            log_msg("%s:   DONE written (err=%d), STATUS after = 0x%08x", tag, err, after);
         }
 
         /* idle heartbeat: every ~10 s of no new requests, show we're alive */
