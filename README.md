@@ -2,6 +2,11 @@
 
 # PDP-11/44 on the QMTECH Zynq-7010 "Bajie" board
 
+## Why!
+I have always wanted a PDP11 for some reason - and this is the closest I can get
+to the real thing. *hint hint* If some generous soul wants to donate one to me,
+I would be hard pressed to decline! It would be greatly welcomed
+
 ## Credits
 
 [Sytse van Slooten](https://pdp2011.sytse.net/) wrote the pdp2011 core this
