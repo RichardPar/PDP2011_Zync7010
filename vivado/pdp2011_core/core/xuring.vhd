@@ -85,9 +85,22 @@
 --                  address keeps moving, so diag_cpu_ifetch narrows
 --                  down whether that's a genuine tight instruction loop
 --                  or just data references from one fixed loop body.
+--   0x64  CMDEVT (read: bit0=pending. write: any value acks) - toggles
+--                  in xu.vhd once per completed guest port command
+--                  (xc_finish, PDMD included). This is the "go check the
+--                  ring NOW" event pdp11-netd was missing entirely before
+--                  2026-09-06 - it opened this UIO device but never
+--                  called read() on it, so every operation ran on a 2ms
+--                  timer with no real notification of guest activity at
+--                  all. Now part of `irq`, so a blocking read() on the
+--                  UIO fd wakes immediately instead of waiting up to one
+--                  poll interval (observed on hardware as TX bursts
+--                  separated by 100+ second gaps and ping RTTs up to 9s -
+--                  see [[xu-ethernet-bridge]]).
 --
--- irq <= mem_op_done or txi_ack or rxi_ack (anything the daemon needs to
--- react to - mirrors xuenc.vhd/sddisk.vhd's convention).
+-- irq <= mem_op_done or txi_ack or rxi_ack or cmd_done_toggle changed
+-- (anything the daemon needs to react to - mirrors xuenc.vhd/sddisk.vhd's
+-- convention).
 --
 
 library IEEE;
@@ -152,6 +165,13 @@ entity xuring is
       irq_trace : in std_logic_vector(31 downto 0);
       pc_trace  : in std_logic_vector(31 downto 0);
 
+      -- Toggles once per completed guest port command (xc_finish in
+      -- xu.vhd, including PDMD) - the "guest did something, go check
+      -- the ring NOW" event. Added 2026-09-06 because pdp11-netd was
+      -- 100% timer-polled with no notification path at all for
+      -- guest-driven activity - see [[xu-ethernet-bridge]].
+      cmd_done_toggle : in std_logic;
+
       -- AXI-Lite slave (PS / pdp11-netd side)
       s_axi_aclk    : in  std_logic;
       s_axi_aresetn : in  std_logic;
@@ -193,6 +213,10 @@ architecture implementation of xuring is
    signal mem_done_sync : std_logic_vector(1 downto 0) := "00";
    signal txi_ack_sync  : std_logic_vector(1 downto 0) := "00";
    signal rxi_ack_sync  : std_logic_vector(1 downto 0) := "00";
+   signal cmd_toggle_sync : std_logic_vector(1 downto 0) := "00";
+   -- last value of cmd_toggle_sync(1) that software has acknowledged
+   -- (by writing CMDEVT) - irq stays asserted while these differ.
+   signal cmd_toggle_seen : std_logic := '0';
 
    -- s_axi-domain values synced INTO clk domain
    signal mem_req_sync2 : std_logic_vector(1 downto 0) := "00";
@@ -219,7 +243,8 @@ begin
    s_axi_rdata   <= axi_rdata;
    s_axi_rresp   <= "00";
 
-   irq <= '1' when mem_done_sync(1) = '1' or txi_ack_sync(1) = '1' or rxi_ack_sync(1) = '1' else '0';
+   irq <= '1' when mem_done_sync(1) = '1' or txi_ack_sync(1) = '1' or rxi_ack_sync(1) = '1'
+                or cmd_toggle_sync(1) /= cmd_toggle_seen else '0';
 
    -- ============ clk-domain side: sync s_axi-owned request levels in,
    -- present them combinationally to xu.vhd ============
@@ -258,6 +283,8 @@ begin
             mem_done_sync <= "00";
             txi_ack_sync  <= "00";
             rxi_ack_sync  <= "00";
+            cmd_toggle_sync <= "00";
+            cmd_toggle_seen <= '0';
             r_memaddr     <= (others => '0');
             r_memdata     <= (others => '0');
             r_mem_req     <= '0';
@@ -272,6 +299,7 @@ begin
             mem_done_sync <= mem_done_sync(0) & mem_op_done;
             txi_ack_sync  <= txi_ack_sync(0) & txi_ack;
             rxi_ack_sync  <= rxi_ack_sync(0) & rxi_ack;
+            cmd_toggle_sync <= cmd_toggle_sync(0) & cmd_done_toggle;
 
             -- latch xu.vhd's read result / current ring position whenever
             -- it strobes a write - plain synchronous capture, xu.vhd
@@ -301,6 +329,8 @@ begin
                      r_txi_req <= '1';
                   when "001011" =>                        -- 0x2C SET_RXI
                      r_rxi_req <= '1';
+                  when "011001" =>                        -- 0x64 CMDEVT - write any value to ack
+                     cmd_toggle_seen <= cmd_toggle_sync(1);
                   when others =>
                      null;
                end case;
@@ -351,6 +381,7 @@ begin
                   when "010110" => axi_rdata <= x"0000000" & "0" & hist_wptr;                         -- 0x58 HIST_WPTR
                   when "010111" => axi_rdata <= irq_trace;                                            -- 0x5C IRQTRACE
                   when "011000" => axi_rdata <= pc_trace;                                             -- 0x60 PCTRACE
+                  when "011001" => axi_rdata <= x"0000000" & "000" & (cmd_toggle_sync(1) xor cmd_toggle_seen); -- 0x64 CMDEVT
                   when others   => axi_rdata <= (others => '0');
                end case;
                axi_rvalid <= '1';

@@ -675,6 +675,28 @@ signal xu_cmd_trace : std_logic_vector(15 downto 0);
 -- the arbiter has selected xu0 (see [[xu-ethernet-bridge]]).
 signal xu_irq_trace : std_logic_vector(31 downto 0);
 
+-- IRQCOUNT (xuring.vhd, added 2026-09-06) - free-running counts of
+-- br_i rising edges (bits15:0, BR5 requests actually made) and bg
+-- rising edges while br_i is asserted (bits31:16, grants actually
+-- received). A slow external devmem poll cannot tell "fires and
+-- clears within microseconds" apart from "never fires" - this counts
+-- every occurrence in hardware so pdp11-netd can sample it before and
+-- after an operation and get an exact number, not a maybe. See
+-- [[xu-ethernet-bridge]] - added after speculating about a "lost
+-- interrupt" from PC/IRQTRACE snapshots alone turned out to be
+-- unverifiable and led to a bad fix (a naive re-arm watchdog that
+-- made packet loss worse, 12%->90%).
+-- Single-bit toggle, flipped every xc_finish (every completed guest port
+-- command - GETCMD/PDMD included). This is the "guest did something, go
+-- check the ring" event pdp11-netd was missing entirely: it opened the
+-- UIO device but never called read() on it, so poll_tx() only ever ran
+-- on a 2ms timer with no actual notification that a PDMD had happened.
+-- A single toggle bit is the standard safe CDC pattern for "an event
+-- occurred" across clock domains (unlike a multi-bit counter, one bit
+-- can't be caught mid-transition) - xuring.vhd 2-flop-synchronizes it
+-- and ORs "changed since software last acked" into ring_irq.
+signal xu_cmd_toggle : std_logic := '0';
+
 -- PCTRACE (xuring.vhd, added 2026-09-06) - bit17 diag_cpu_ifetch (the
 -- CPU's 'ifetch' output - this specific bus cycle is an instruction
 -- fetch, not a data access; cpu_addr_v carries BOTH so this bit is
@@ -1072,6 +1094,7 @@ begin
          hist_wptr => conv_std_logic_vector(xu_hist_wptr, 3),
          irq_trace => xu_irq_trace,
          pc_trace  => xu_pc_trace,
+         cmd_done_toggle => xu_cmd_toggle,
 
          s_axi_aclk    => ring_s_axi_aclk,
          s_axi_aresetn => ring_s_axi_aresetn,
@@ -1284,6 +1307,7 @@ begin
             xu_fnc <= (others => '0');
             xu_last_port_cmd <= (others => '0');
             xu_cmd_counter <= (others => '0');
+            xu_cmd_toggle <= '0';
             xu_cmd_hist <= (others => (others => '0'));
             xu_hist_wptr <= 0;
             xu_udbb <= (others => '0');
@@ -1535,6 +1559,7 @@ begin
                      ring_npr <= '0';
                      pcsr0_pcmw <= '0';
                      xu_cmd_counter <= xu_cmd_counter + 1;
+                     xu_cmd_toggle <= not xu_cmd_toggle;
                      xu_cmd_hist(xu_hist_wptr) <= xu_fnc & xu_last_port_cmd & xu_cmd_counter;
                      if xu_hist_wptr = 7 then
                         xu_hist_wptr <= 0;

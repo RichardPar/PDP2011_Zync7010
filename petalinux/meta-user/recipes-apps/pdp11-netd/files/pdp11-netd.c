@@ -69,6 +69,7 @@
 #include <linux/if.h>
 #include <linux/if_tun.h>
 #include <dirent.h>
+#include <poll.h>
 
 #define RING_UIO_NAME  "pdp11net-ring"
 #define RING_MAP_SIZE  0x1000
@@ -89,6 +90,7 @@
 #define REG_LASTCMD    (0x34 / 4)
 #define REG_HIST0      (0x38 / 4)
 #define REG_HIST_WPTR  (0x58 / 4)
+#define REG_CMDEVT     (0x64 / 4)
 
 #define MEMCTL_REQ      (1u << 0)
 #define MEMCTL_ISWRITE  (1u << 1)
@@ -128,7 +130,43 @@
 
 #define MEM_OP_TIMEOUT_ITERS 200000
 
+/* The real DEUNA/DELUA is a 10base-T (10 Mbit) part, and a real PDP-11's
+ * practical throughput ceiling - UNIBUS DMA plus the CPU's own frame
+ * processing - sits well below even that nominal wire rate; 1 Mbit/s is
+ * a reasonable estimate of what a real deployment could ever actually
+ * sustain. eth0 on this board is Gigabit, so tap0 hands us frames at
+ * whatever rate the real, modern, noisy LAN produces them - potentially
+ * 1000x faster than anything this design was ever built to receive.
+ * On real 10base-T hardware, each frame's own transmission takes real,
+ * physical serialization time (preamble+frame+minimum interframe gap) -
+ * an inherent, natural rate limiter that means bursts arrive spread out
+ * over time, giving the guest's slow interrupt handler room to keep up
+ * between frames. Bridging straight from Gigabit removes that limiter
+ * entirely: a burst that a real 10base-T segment would serialize over
+ * several milliseconds instead lands in well under one - measured on
+ * hardware wrapping the guest's 6-descriptor RX ring twice in under a
+ * second, with some arrivals only 64-350us apart, fast enough that a
+ * genuine ARP/ICMP reply can be overwritten before the guest looks at
+ * that slot (see [[xu-ethernet-bridge]]). Pacing RX delivery to emulate
+ * the real link's serialization delay restores that natural throttle. */
+/* NOTE (2026-09-06): set to 0 to DISABLE pacing entirely while isolating
+ * a reply-delivery regression. The rate-limit idea is sound - the real
+ * 10base-T wire genuinely serialized frames and gave the slow guest room
+ * between them - but this implementation DELAYS without ever DROPPING,
+ * so a burst of broadcast junk consumes the virtual-wire budget and a
+ * latency-critical ICMP reply queues up behind it (and tap0's own queue
+ * backs up while the main thread sits in nanosleep). A real overloaded
+ * receiver drops instead of queueing. If re-enabled, add a bound: if the
+ * virtual wire is already backed up beyond a few ms, drop the frame
+ * rather than delaying it. See [[xu-ethernet-bridge]]. */
+#define RX_LINK_RATE_BPS  0
+/* preamble(7) + SFD(1) + minimum interframe gap - real per-frame
+ * overhead that consumes wire time even though it never appears in the
+ * captured frame length */
+#define RX_FRAME_OVERHEAD_BYTES 20
+
 static volatile uint32_t *ring_regs = NULL;
+static int ring_uio_fd = -1;
 static int tap_fd = -1;
 static FILE *logf = NULL;
 static pthread_mutex_t ring_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -330,38 +368,62 @@ static void poll_tx(void)
 	strobe_interrupt(REG_SET_TXI);
 }
 
-static void deliver_rx_frame(const uint8_t *buf, int len)
+/* The station address xu.vhd reports via FC_RDPHYAD. Must match
+ * xu_phyad_w0/w1/w2 in xu.vhd. */
+static const uint8_t xu_mac[6] = { 0x08, 0x00, 0x2b, 0x11, 0x22, 0x33 };
+
+/* Do the address filtering a real DEUNA does in hardware. tap0 is on a
+ * bridge, so it hands us every frame on the LAN - including unicast for
+ * OTHER hosts and a steady drip of IPv6/mDNS/STP multicast. Each one we
+ * forward costs hundreds of slow single-word DMA writes and, worse,
+ * consumes one of only NRCV(=6) receive descriptors, which is how real
+ * replies ended up dropped ("not owned") or delayed. The driver enables
+ * no multicast addresses, so faithful behaviour is: our own address and
+ * broadcast only. */
+static int rx_addressed_to_us(const uint8_t *buf, int len)
+{
+	if (len < 6)
+		return 0;
+	if (memcmp(buf, xu_mac, 6) == 0)
+		return 1;
+	if (memcmp(buf, "\xff\xff\xff\xff\xff\xff", 6) == 0)
+		return 1;
+	return 0;
+}
+
+/* Returns 0 delivered, RX_BUSY if the guest has not re-armed the next
+ * descriptor yet (caller should keep the frame queued and retry), or
+ * RX_DROP for a frame that can never be delivered. */
+#define RX_OK    0
+#define RX_BUSY  1
+#define RX_DROP  2
+
+static int try_deliver_rx_frame(const uint8_t *buf, int len)
 {
 	uint32_t state = ring_regs[REG_PCSR1STATE] & 0xF;
-	if (state != PCSR1_RUNNING) {
-		log_msg("RX: guest not RUNNING yet (pcsr1_state=0x%x), dropping %d-byte frame", state, len);
-		return;
-	}
+	if (state != PCSR1_RUNNING)
+		return RX_DROP;   /* guest isn't up yet - nothing to hold it for */
 
 	uint32_t rdrb  = ring_regs[REG_RDRB] & 0x3FFFF;
 	uint32_t rrlen = ring_regs[REG_RRLEN] & 0xFFFF;
 	uint32_t rxnext = ring_regs[REG_RXNEXT] & 0xFFFF;
-	if (rrlen == 0) {
-		log_msg("RX: ring not configured yet, dropping %d-byte frame", len);
-		return;
-	}
+	if (rrlen == 0)
+		return RX_DROP;   /* ring not configured yet */
 	if (rxnext >= rrlen)
 		rxnext = 0;
 
 	if (len <= 0 || len > RING_MAX_FRAME) {
 		log_msg("RX: implausible %d-byte frame from tap0, dropping", len);
-		return;
+		return RX_DROP;
 	}
 
 	uint32_t ba = rdrb + DESC_STRIDE * rxnext;
 	uint16_t d[4];
 	if (read_desc(ba, d) < 0)
-		return;
+		return RX_BUSY;   /* transient - try again shortly */
 
-	if (!(d[2] & OWN_BIT)) {
-		log_msg("RX: descriptor at rxnext=%u not owned, dropping %d-byte frame", rxnext, len);
-		return;
-	}
+	if (!(d[2] & OWN_BIT))
+		return RX_BUSY;   /* guest hasn't re-armed this slot - KEEP the frame */
 
 	/* Present the frame the way real DEUNA hardware would, or the guest
 	 * throws it away (see [[xu-ethernet-bridge]]):
@@ -411,7 +473,7 @@ static void deliver_rx_frame(const uint8_t *buf, int len)
 	if (plen > bufsz) {
 		log_msg("RX: %d-byte frame (padded %u) exceeds descriptor buffer (%u bytes) at rxnext=%u, dropping",
 			len, plen, bufsz, rxnext);
-		return;
+		return RX_DROP;
 	}
 
 	uint32_t addr = ((uint32_t)(d[2] & 0x3) << 16) | d[1];
@@ -421,7 +483,7 @@ static void deliver_rx_frame(const uint8_t *buf, int len)
 		uint32_t hi = (i * 2 + 1 < (uint32_t)len) ? buf[i * 2 + 1] : 0;
 		if (mem_write_word(addr + i * 2, (uint16_t)(lo | (hi << 8))) < 0) {
 			log_msg("RX: frame-data write failed at rxnext=%u, aborting this delivery", rxnext);
-			return;
+			return RX_DROP;
 		}
 	}
 
@@ -432,14 +494,142 @@ static void deliver_rx_frame(const uint8_t *buf, int len)
 	};
 	if (write_desc(ba, wb) < 0) {
 		log_msg("RX: descriptor writeback failed at rxnext=%u", rxnext);
-		return;
+		return RX_DROP;
 	}
 
 	uint32_t newnext = (rxnext + 1 >= rrlen) ? 0 : rxnext + 1;
 	ring_regs[REG_RXNEXT] = newnext;
 
 	strobe_interrupt(REG_SET_RXI);
-	log_msg("RX: %d bytes delivered to descriptor at rxnext=%u", len, rxnext);
+	return RX_OK;
+}
+
+/* ============ pre-RX buffer ============
+ *
+ * eth0 here is Gigabit; the guest has NRCV=6 receive descriptors and a
+ * real PDP-11's speed to drain them. Measured on hardware, ordinary
+ * modern-LAN broadcast chatter wraps all 6 slots in well under a second
+ * (some arrivals only 64-350us apart) - far faster than the guest's
+ * interrupt handler can re-arm them. Previously a frame arriving with no
+ * free descriptor was simply DROPPED on the spot, which is how genuine
+ * ARP/ICMP replies went missing even though the wire showed them
+ * arriving correctly within ~300us.
+ *
+ * This queue is the elastic buffer between the two rates: frames are
+ * held here and fed into the ring only as the guest actually frees
+ * descriptors, so a burst is absorbed instead of overwriting replies.
+ * It is deliberately much deeper than the hardware ring - the whole
+ * point is to ride out bursts the 6-slot ring cannot. Only a sustained
+ * overload (queue genuinely full) drops, which is the correct place for
+ * loss to happen. See [[xu-ethernet-bridge]]. */
+#define RX_QUEUE_DEPTH 256
+
+struct rx_qent {
+	int len;
+	uint8_t buf[RING_MAX_FRAME];
+};
+static struct rx_qent rx_q[RX_QUEUE_DEPTH];
+static int rx_q_head;          /* next slot to write */
+static int rx_q_tail;          /* next slot to read  */
+static int rx_q_count;
+static unsigned long rx_q_dropped;
+static unsigned long rx_q_delivered;
+static int rx_q_high_water;
+static pthread_mutex_t rx_q_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Feed queued frames into the ring for as long as the guest has
+ * descriptors free. Safe to call from either thread. Lock order is
+ * always rx_q_lock -> ring_lock (mem_*_word takes the latter). */
+/* Deliver at most this many frames per drain call. Without a bound, a
+ * backlog gets dumped into the 6-slot ring in one tight loop with a
+ * SET_RXI strobe per frame - an interrupt avalanche at exactly the
+ * moment the guest is least able to cope. Real hardware is paced by the
+ * wire; this stands in for that. */
+#define RX_DRAIN_BURST 4
+
+static void rx_queue_drain(void)
+{
+	int budget = RX_DRAIN_BURST;
+	pthread_mutex_lock(&rx_q_lock);
+	while (rx_q_count > 0 && budget-- > 0) {
+		struct rx_qent *e = &rx_q[rx_q_tail];
+		int rc = try_deliver_rx_frame(e->buf, e->len);
+		if (rc == RX_BUSY)
+			break;         /* no free descriptor - keep it queued */
+		if (rc == RX_OK)
+			rx_q_delivered++;
+		rx_q_tail = (rx_q_tail + 1) % RX_QUEUE_DEPTH;
+		rx_q_count--;
+	}
+	pthread_mutex_unlock(&rx_q_lock);
+}
+
+static void rx_queue_push(const uint8_t *buf, int len)
+{
+	if (len <= 0 || len > RING_MAX_FRAME)
+		return;
+	/* address filtering happens here, before the frame ever takes up
+	 * queue space - exactly what a real DEUNA's address filter does */
+	if (!rx_addressed_to_us(buf, len))
+		return;
+
+	pthread_mutex_lock(&rx_q_lock);
+	if (rx_q_count >= RX_QUEUE_DEPTH) {
+		rx_q_dropped++;
+		if ((rx_q_dropped % 100) == 1)
+			log_msg("RX: pre-RX queue full (%d frames), dropped %lu so far - "
+				"guest cannot drain the ring fast enough",
+				RX_QUEUE_DEPTH, rx_q_dropped);
+		pthread_mutex_unlock(&rx_q_lock);
+		return;
+	}
+	struct rx_qent *e = &rx_q[rx_q_head];
+	memcpy(e->buf, buf, (size_t)len);
+	e->len = len;
+	rx_q_head = (rx_q_head + 1) % RX_QUEUE_DEPTH;
+	rx_q_count++;
+	if (rx_q_count > rx_q_high_water) {
+		rx_q_high_water = rx_q_count;
+		/* only at a few thresholds - this must not become a log storm */
+		if (rx_q_high_water == 4 || rx_q_high_water == 16 ||
+		    rx_q_high_water == 64 || rx_q_high_water == 192)
+			log_msg("RX: pre-RX queue high-water %d frames (delivered %lu, dropped %lu)",
+				rx_q_high_water, rx_q_delivered, rx_q_dropped);
+	}
+	pthread_mutex_unlock(&rx_q_lock);
+
+	rx_queue_drain();
+}
+
+/* Measure what one word of PDP-11 memory access actually costs over the
+ * AXI-Lite bridge. Every frame byte moves through this path - a 1500-byte
+ * frame is 750 of these - so if a single word op is expensive, the whole
+ * word-at-a-time design is the bottleneck and no amount of buffering or
+ * interrupt tuning on either side will fix it. Reading is side-effect
+ * free, so this is safe to run at startup before the guest is up. */
+static void benchmark_mem_op(void)
+{
+	const int N = 2000;
+	struct timespec t0, t1;
+	int failures = 0;
+
+	clock_gettime(CLOCK_MONOTONIC, &t0);
+	for (int i = 0; i < N; i++) {
+		uint16_t w;
+		if (mem_read_word(0, &w) < 0)
+			failures++;
+	}
+	clock_gettime(CLOCK_MONOTONIC, &t1);
+
+	long long ns = (long long)(t1.tv_sec - t0.tv_sec) * 1000000000LL
+		     + (t1.tv_nsec - t0.tv_nsec);
+	long long per_op = ns / N;
+
+	log_msg("BENCH: %d mem_read_word ops in %lld us => %lld ns/word "
+		"(%d failures). A 98-byte frame = 49 words ~= %lld us; "
+		"a 1500-byte frame = 750 words ~= %lld us.",
+		N, ns / 1000, per_op, failures,
+		(per_op * 49) / 1000, (per_op * 750) / 1000);
 }
 
 static const char *port_cmd_name(uint32_t cmd)
@@ -527,23 +717,84 @@ static void poll_cmd_history(void)
 	last_wptr = wptr;
 }
 
+/* Do one round of the work that used to run on a bare 2ms timer. Common
+ * to both the interrupt-driven wake and the timeout fallback below. */
+static void poll_thread_work(void)
+{
+	poll_cmd_trace();
+	poll_cmd_history();
+	uint32_t state = ring_regs[REG_PCSR1STATE] & 0xF;
+	if (state == PCSR1_RUNNING) {
+		poll_tx();
+		/* the guest re-arms RX descriptors from deintr(), so every wake
+		 * is a chance to push more of the pre-RX queue into the ring */
+		rx_queue_drain();
+	}
+}
+
+/* 2026-09-06: this loop used to be `usleep(2000)` around the work above
+ * with NOTHING event-driven at all - pdp11-netd opened the ring's UIO
+ * device but never once called read() on it. Every guest-initiated event
+ * (a new PDMD, a completed port command) had to wait for the next 2ms
+ * tick to even be noticed, and measured on hardware this compounded into
+ * TX bursts separated by 100+ SECOND gaps and ping RTTs up to 9 seconds -
+ * see [[xu-ethernet-bridge]]. xu.vhd/xuring.vhd now toggle CMDEVT (0x64)
+ * on every completed guest port command and fold that into `irq`, so we
+ * block on the UIO fd and wake immediately instead.
+ *
+ * uio_pdrv_genirq masks the interrupt after it fires until userspace
+ * writes a 4-byte "1" back to re-enable it - done once at open time in
+ * open_ring_uio() and again after every wake here.
+ *
+ * poll() with a bounded timeout, not a bare blocking read(): if the IRQ
+ * wiring ever turns out wrong (this project has been burned by exactly
+ * that kind of device-tree/IRQ_F2P assumption before), this degrades to
+ * the old ~10ms polling behaviour instead of hanging the daemon outright. */
+#define POLL_FALLBACK_MS 10
+/* NAPI-style burst drain. One UIO wake costs a full kernel round-trip
+ * (read() to consume, write() to re-enable, plus the context switches);
+ * paying that per EVENT is fine when idle but is far more overhead than
+ * the old fixed timer once the guest is issuing commands rapidly. First
+ * attempt did exactly that and regressed badly on hardware: 4030
+ * mem_wait_idle timeouts, a renewed PDMD storm and a hung console,
+ * because this thread spun through syscalls fast enough to starve the
+ * main tap0 thread of `ring_lock`. So: once woken, keep draining while
+ * CMDEVT still reports work pending, and only then re-arm and sleep -
+ * bounded so a genuinely runaway guest can't starve the RX thread
+ * either. See [[xu-ethernet-bridge]]. */
+#define IRQ_DRAIN_MAX 32
+
 static void *poll_thread_fn(void *arg)
 {
 	(void)arg;
 	for (;;) {
-		poll_cmd_trace();
-		poll_cmd_history();
-		uint32_t state = ring_regs[REG_PCSR1STATE] & 0xF;
-		if (state == PCSR1_RUNNING)
-			poll_tx();
-		/* short interval regardless of state - the driver's init
-		 * sequence (SELFTEST/GETPCBB/GETCMD/START) can happen faster
-		 * than a slow idle poll would catch, and missing one of those
-		 * defeats the whole point of this trace. (Tried 100us while
-		 * chasing the hang; timing was never the variable - the real
-		 * bug was DESC_STRIDE, see its comment - so this is back at
-		 * 2ms rather than needlessly busy-polling the ARM side.) */
-		usleep(2000);
+		struct pollfd pfd = { .fd = ring_uio_fd, .events = POLLIN };
+		int rc = poll(&pfd, 1, POLL_FALLBACK_MS);
+
+		if (rc > 0 && (pfd.revents & POLLIN)) {
+			uint32_t icount;
+			ssize_t n = read(ring_uio_fd, &icount, sizeof(icount));
+			if (n == (ssize_t)sizeof(icount)) {
+				/* Drain the burst in-loop rather than taking another
+				 * interrupt round-trip per event. Ack CMDEVT first
+				 * each time so a still-asserted level doesn't just
+				 * re-trigger the moment we re-enable. */
+				for (int i = 0; i < IRQ_DRAIN_MAX; i++) {
+					ring_regs[REG_CMDEVT] = 1;
+					poll_thread_work();
+					if (!(ring_regs[REG_CMDEVT] & 1))
+						break;   /* nothing further pending */
+				}
+				uint32_t one = 1;
+				if (write(ring_uio_fd, &one, sizeof(one)) != (ssize_t)sizeof(one))
+					log_msg("warning: could not re-enable ring uio interrupt: %s",
+						strerror(errno));
+				continue;
+			}
+		}
+		/* timeout, or a poll()/read() error - fall back to plain
+		 * polling this round rather than getting stuck */
+		poll_thread_work();
 	}
 	return NULL;
 }
@@ -604,7 +855,17 @@ static int open_ring_uio(void)
 	}
 
 	ring_regs = (volatile uint32_t *)m;
+	ring_uio_fd = fd;
 	log_msg("using %s for the ring bridge, mapped %d bytes", devpath, RING_MAP_SIZE);
+
+	/* uio_pdrv_genirq (matches this device's "generic-uio" compatible
+	 * string) starts with the IRQ line masked until userspace explicitly
+	 * enables it by writing a 4-byte "1" - without this, read() below
+	 * would block forever even once xu.vhd asserts irq. */
+	uint32_t one = 1;
+	if (write(fd, &one, sizeof(one)) != (ssize_t)sizeof(one))
+		log_msg("warning: could not enable %s interrupt: %s", devpath, strerror(errno));
+
 	return 0;
 }
 
@@ -699,6 +960,8 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	benchmark_mem_op();
+
 	setup_bridge(ifname);
 
 	pthread_t poll_thr;
@@ -707,6 +970,13 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	/* virtual-wire-time model: the monotonic time at which a real
+	 * 10base-T link running at RX_LINK_RATE_BPS would have finished
+	 * serializing everything received so far. Initialised lazily on
+	 * the first frame so idle time before it doesn't count against
+	 * the budget. */
+	struct timespec next_free = { 0, 0 };
+
 	uint8_t buf[RING_MAX_FRAME];
 	for (;;) {
 		ssize_t n = read(tap_fd, buf, sizeof(buf));
@@ -714,7 +984,38 @@ int main(int argc, char **argv)
 			log_msg("tap read failed: %s", strerror(errno));
 			continue;
 		}
-		deliver_rx_frame(buf, (int)n);
+
+		if (RX_LINK_RATE_BPS > 0) {
+		struct timespec now;
+		clock_gettime(CLOCK_MONOTONIC, &now);
+		if (next_free.tv_sec == 0 && next_free.tv_nsec == 0)
+			next_free = now;
+		if (now.tv_sec > next_free.tv_sec ||
+		    (now.tv_sec == next_free.tv_sec && now.tv_nsec > next_free.tv_nsec))
+			next_free = now;   /* link was idle - don't bank unused capacity */
+		else {
+			struct timespec delay = {
+				.tv_sec  = next_free.tv_sec - now.tv_sec,
+				.tv_nsec = next_free.tv_nsec - now.tv_nsec,
+			};
+			if (delay.tv_nsec < 0) {
+				delay.tv_nsec += 1000000000L;
+				delay.tv_sec  -= 1;
+			}
+			nanosleep(&delay, NULL);
+		}
+
+		long long bits = ((long long)n + RX_FRAME_OVERHEAD_BYTES) * 8;
+		long long frame_ns = bits * 1000000000LL / RX_LINK_RATE_BPS;
+		next_free.tv_nsec += frame_ns % 1000000000LL;
+		next_free.tv_sec  += frame_ns / 1000000000LL;
+		if (next_free.tv_nsec >= 1000000000L) {
+			next_free.tv_nsec -= 1000000000L;
+			next_free.tv_sec  += 1;
+		}
+		}
+
+		rx_queue_push(buf, (int)n);
 	}
 
 	return 0;
