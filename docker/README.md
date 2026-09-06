@@ -69,9 +69,9 @@ rename it `BOOT.BIN.new` and use that).
 tracked customizations from `../petalinux/meta-user` on top, and re-applies the
 couple of config bits meta-user can't carry (ext4-on-SD rootfs, the
 `uio_pdrv_genirq.of_id=generic-uio` bootarg). So a clone on another machine
-builds the same image — the recipes (`pdp11-diskd`, `tu58fs`, `picocom`,
-`pdp11-scripts`), the reserved-memory and UIO device-tree bits, and the kernel
-config all come along.
+builds the same image — the recipes (`pdp11-diskd`, `pdp11-netd`, `tu58fs`,
+`picocom`, `pdp11-scripts`), the reserved-memory and UIO device-tree bits, and
+the kernel config all come along.
 
 If all you touched is the bitstream and you just want a new BOOT.BIN,
 `./plnx.sh package` repackages it around the current `deploy/pdp2011_zynq.bit`

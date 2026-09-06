@@ -17,7 +17,7 @@ spark for wanting a real PDP-11 running again in the first place.
 
 Everything is built by the top-level **`./build.sh`** — bitstream, then the full
 PetaLinux (kernel, rootfs, `BOOT.BIN`), including the rootfs apps `pdp11-diskd`,
-`tu58fs`, `picocom`, and `pdp11-scripts`. Every artifact lands flat in `deploy/`:
+`pdp11-netd`, `tu58fs`, `picocom`, and `pdp11-scripts`. Every artifact lands flat in `deploy/`:
 
 | File | From |
 |---|---|
@@ -27,7 +27,8 @@ PetaLinux (kernel, rootfs, `BOOT.BIN`), including the rootfs apps `pdp11-diskd`,
 | `image.ub` | kernel + device tree + ramdisk FIT image |
 | `boot.scr` | u-boot boot script |
 | `rootfs.ext4` / `rootfs.tar.gz` / `rootfs.cpio.gz` | the PetaLinux rootfs, three packagings |
-| `pdp11-diskd` | just the daemon binary, for a fast redeploy (see `build_pdp11_diskd.sh`) |
+| `pdp11-diskd` | just the disk daemon binary, for a fast redeploy (see `build_pdp11_diskd.sh`) |
+| `pdp11-netd` | just the ethernet-bridge daemon binary, same trick (see `build_pdp11_netd.sh`) |
 
 `BOOT.BIN`/`image.ub`/`boot.scr` go on the boot card's FAT32 partition;
 `rootfs.*` becomes the ext4 partition's contents — see "Deploying" below.
@@ -72,10 +73,14 @@ The two stages individually:
 In `project-spec/meta-user`:
 
 - `system-user.dtsi` — `reserved-memory pdp11ram@1f800000`, `no-map`,
-  `reg = <0x1f800000 0x800000>`.
+  `reg = <0x1f800000 0x800000>`, plus hand-added `rh_disk_uio` and
+  `ring_uio` UIO nodes (see "File-backed RH/RP06 disk" / "xu DEUNA
+  Ethernet").
 - `pdp11-scripts` recipe — installs `pdp11_reset.sh`.
 - `tu58fs` and `picocom` recipes, plus `bsp.cfg` enabling
-  `CONFIG_SERIAL_UARTLITE`.
+  `CONFIG_SERIAL_UARTLITE` (and `CONFIG_TUN`/UIO for the daemons).
+- `pdp11-netd` recipe — the xu DEUNA ethernet bridge (see "xu DEUNA
+  Ethernet").
 - rootfs on the SD's ext4 partition (`root=/dev/mmcblk0p2`), not initrd.
 
 A port of the [pdp2011](https://pdp2011.sytse.net/) VHDL core (PDP-11/44,
@@ -92,7 +97,8 @@ The primary console (`kl0`) uses physical FPGA pins; three more (`kl1`-`kl3`)
 are bridged to Linux over `/dev/ttyUL*` (see "Serial consoles and TU58"
 below). The RL11 disk started on a physical SD (`sdspi.vhd`) and was later
 moved to an image file on the PS served over AXI — see "File-backed RL disk"
-below.
+below. The xu DEUNA ethernet is bridged to the real LAN the same way, by a
+daemon over AXI — see "xu DEUNA Ethernet".
 
 ## Deploying
 
@@ -166,8 +172,9 @@ terminal.
 | `/dev/ttyUL2` | `0x42010000` | 40 | 9600 | `kl2` 776510 / 310 | `TT2:` |
 | `/dev/ttyUL3` | `0x42020000` | 41 | 9600 | `kl3` 776520 / 320 | `TT3:` |
 
-The uartlites sit on `M_AXI_GP0`, alongside the reset/debug GPIOs and the RL/RH
-disk backends below (7 masters on that interconnect as of the RH bridge).
+The uartlites sit on `M_AXI_GP0`, alongside the reset/debug GPIOs, the RL/RH
+disk backends, and the xu ring bridge (8 peripherals on that interconnect as
+of the xu bridge).
 The 6.1 uartlite driver has no polled mode: with interrupts unwired it fails at
 probe with `IRQ index 0 not found`, so each `interrupt` goes to the PS through
 an `xlconcat` into `IRQ_F2P` (`PCW_USE_FABRIC_INTERRUPT` and `PCW_IRQ_F2P_INTR`
@@ -365,6 +372,54 @@ cell Xilinx's generator already computed for it rather than trying to derive
 it — if the BD's IRQ_F2P wiring ever moves, that value goes stale silently;
 see the comment on the node for how to refresh it.
 
+## xu DEUNA Ethernet
+
+The core's `xu` DEUNA is on (`have_xu => 1` in `zynq_top.vhd`; UNIBUS 774510,
+vector 120, BR5 + NPR), and its network side reaches the **physical LAN**:
+**`pdp11-netd`** opens a tap interface, bridges it with eth0 on `br0`, and
+services the DEUNA's descriptor rings in software, so 2.11BSD's stock `de`
+driver (and RSX's) drive a real `de0` without knowing anything changed. The
+station address is fixed at 08:00:2b:11:22:33 (`xu_phyad_w*` in `xu.vhd`).
+
+After two FPGA-side ring-walk engines each caused a reproducible board hang
+(xu.vhd's own debug state showed the engine idle at the freeze, both times),
+the entire descriptor-ring algorithm moved out of the fabric into the daemon.
+All **`xuring.vhd`** provides now is the one DMA primitive that already
+worked — a single-word PDP-11 memory read/write over AXI-Lite
+(`MEMADDR`/`MEMDATA`/`MEMCTL`, 4-phase handshake) — plus the ring geometry
+latched by the guest's WRF command, the TXNEXT/RXNEXT positions (owned by
+the daemon), TXI/RXI interrupt strobes, and a command-completed event
+(`CMDEVT`) folded into the UIO interrupt so the daemon blocks on the UIO fd
+instead of polling a timer (the old 2 ms timer showed up as 100+ second TX
+gaps and 9 s ping RTTs). It lives at `0x43020000` on `M_AXI_GP0` (SPI 0x22
+into `IRQ_F2P`), exposed as UIO `pdp11net-ring` by a hand-added `ring_uio`
+node in `system-user.dtsi` — same generator-quirk workaround as the RH
+disk's node, same "re-verify the interrupt cell after a BD IRQ rewiring"
+caveat. Register map and descriptor format:
+`petalinux/meta-user/recipes-apps/pdp11-netd/README.md`.
+
+Details that cost real debugging time and are now load-bearing in the
+daemon: the descriptor stride is **10 bytes / 5 words** (2.11BSD's
+`struct de_ring`, including the never-inspected `r_rid`) — assuming 8 was
+the multi-day "board hang"; after acking a MEMCTL op you must wait for DONE
+to *drop* or reads return the previous word; and inbound frames must be
+padded to the 60-byte Ethernet minimum with MLEN counting a 4-byte FCS, or
+2.11BSD's `derecv()` silently discards every one of them. On the RX side
+the daemon filters (own MAC + broadcast only) and holds frames in a
+256-deep queue, feeding the guest's 6-slot RX ring only as fast as the
+guest re-arms descriptors — a Gigabit LAN on a bridge delivers bursts far
+faster than any real 10base-T wire ever did. A virtual-wire pacing model
+exists but is disabled (`RX_LINK_RATE_BPS 0`; it delayed without dropping,
+so junk could queue ahead of a real reply — see the note in `pdp11-netd.c`
+before re-enabling).
+
+`pdp11-netd` auto-starts at boot, brings tap0/br0 up, and re-DHCPs on br0
+(eth0's own lease dies when it joins the bridge). It idles until the guest
+does `ifconfig de0 up`. `scripts/build_pdp11_netd.sh` +
+`scripts/deploy_pdp11_netd.sh` redeploy just the daemon, same trick as the
+diskd pair — but HDL changes need `./build.sh bitstream` and a BOOT.BIN
+reflash first.
+
 ## Auto-boot ROM: rk/rl/rp fallover
 
 `bootrom => boot_pdp2011` (`zynq_top.vhd`) tries controllers in order rk, rl,
@@ -425,7 +480,8 @@ build.sh             top-level build: bitstream + PetaLinux -> deploy/
 HISTORY.md           reverse-chronological log of milestones
 vivado/
   pdp2011_core/
-    core/              pdp2011 core VHDL (+ sddisk.vhd, the AXI disk backend)
+    core/              pdp2011 core VHDL (+ sddisk.vhd the AXI disk backend,
+                       xuring.vhd the xu DEUNA AXI bridge window)
     zynq_top.vhd       top level: unibus + ddr_mem + KL11s + panel
     ddr_mem.vhd        PDP-11 bus <-> S_AXI_HP0 DDR3 bridge
     neopixel_driver.vhd  WS2812 driver
@@ -439,17 +495,21 @@ docker/
 scripts/
   setup_host.sh, fix_libtinfo.sh, fix_build_memory.sh   host setup
   flash_sd_card.sh, flash_bootbin_net.sh, deploy_petalinux_net.sh   deploy
-  rl0_boot.sh, rp06_boot.sh, rh11_probe.sh   runtime helpers
+  build_pdp11_diskd.sh, build_pdp11_netd.sh   fast daemon-only cross-builds
+  deploy_pdp11_diskd.sh, deploy_pdp11_netd.sh   push a daemon to a running board
+  rl0_boot.sh, rp06_boot.sh, rh11_probe.sh, dlctl.sh   runtime helpers
 disks/
   rtv53_sd.img, xxdp25_sd.img   RL02 images (served by pdp11-diskd as dl0.img/dl1.img)
   211bsd-rp06.img                RP06 image (served as db0.img, see "File-backed RH/RP06 disk")
 deploy/
   pdp2011_zynq.bit, pdp2011_zynq_wrapper.xsa   Vivado output
   BOOT.BIN, image.ub, boot.scr, rootfs.tar.gz  PetaLinux output
+  pdp11-diskd, pdp11-netd   daemon binaries for the fast-redeploy scripts
 ```
 
-The PetaLinux app recipes (`pdp11-diskd`, `tu58fs`, `picocom`, `pdp11-scripts`),
-kernel config, and device-tree overrides live in the PetaLinux project's
+The PetaLinux app recipes (`pdp11-diskd`, `pdp11-netd`, `tu58fs`, `picocom`,
+`pdp11-scripts`), kernel config, and device-tree overrides live in the
+PetaLinux project's
 `project-spec/meta-user`, which `build.sh`/`docker/plnx.sh` create and build
 outside this tree (default `../.petalinux-docker/work`, overridable).
 

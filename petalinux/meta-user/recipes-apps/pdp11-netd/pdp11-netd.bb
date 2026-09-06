@@ -1,9 +1,13 @@
-SUMMARY = "pdp11-netd - bridge the PDP-11's xu DEUNA ring engine to Linux networking"
-DESCRIPTION = "Userspace daemon that backs xuring.vhd's AXI-Lite + UIO frame \
-handoff for xu.vhd's DEUNA descriptor-ring packet engine. Reads/writes raw \
-frame bytes only - the PDP-11 ring format itself is entirely xu.vhd's \
-concern. Bridges a tap device with eth0 so RSX/2.11BSD's stock DEUNA \
-drivers reach the physical network. Auto-started at boot (SysV init)."
+SUMMARY = "pdp11-netd - bridge the PDP-11's xu DEUNA ethernet to the LAN via tap0/br0/eth0"
+DESCRIPTION = "Userspace daemon that bridges the PL's xu DEUNA (xu.vhd, \
+have_xu=1 - UNIBUS 774510, vector 120) to the physical network through a \
+tap device bridged with eth0, so RSX/2.11BSD's stock DEUNA drivers reach \
+the real LAN. The ENTIRE descriptor-ring walk (2.11BSD struct de_ring \
+parsing, OWN-bit handling, ring-position bookkeeping, TXI/RXI strobes) \
+lives in this daemon - xuring.vhd only provides the single-word PDP-11 \
+memory access primitive, the WRF-latched ring geometry, and a \
+command-completed event over AXI-Lite + UIO. Auto-started at boot (SysV \
+init); re-DHCPs on br0 after moving eth0 into the bridge."
 LICENSE = "CLOSED"
 
 SRC_URI = "file://Makefile \
