@@ -139,6 +139,29 @@ entity unibus is
       have_xu_enc : in integer range 0 to 1 := 0;                    -- include frontend for enc424j600
       have_xu_esp : in integer range 0 to 1 := 0;                    -- include frontend for esp32
 
+-- xu DEUNA <-> Linux frame bridge (xuring.vhd, inside xu.vhd) - AXI-Lite
+-- + irq to the PS, serviced by pdp11-netd
+      xu_ring_s_axi_aclk    : in  std_logic := '0';
+      xu_ring_s_axi_aresetn : in  std_logic := '0';
+      xu_ring_s_axi_awaddr  : in  std_logic_vector(16 downto 0) := (others => '0');
+      xu_ring_s_axi_awvalid : in  std_logic := '0';
+      xu_ring_s_axi_awready : out std_logic;
+      xu_ring_s_axi_wdata   : in  std_logic_vector(31 downto 0) := (others => '0');
+      xu_ring_s_axi_wstrb   : in  std_logic_vector(3 downto 0) := (others => '0');
+      xu_ring_s_axi_wvalid  : in  std_logic := '0';
+      xu_ring_s_axi_wready  : out std_logic;
+      xu_ring_s_axi_bresp   : out std_logic_vector(1 downto 0);
+      xu_ring_s_axi_bvalid  : out std_logic;
+      xu_ring_s_axi_bready  : in  std_logic := '0';
+      xu_ring_s_axi_araddr  : in  std_logic_vector(16 downto 0) := (others => '0');
+      xu_ring_s_axi_arvalid : in  std_logic := '0';
+      xu_ring_s_axi_arready : out std_logic;
+      xu_ring_s_axi_rdata   : out std_logic_vector(31 downto 0);
+      xu_ring_s_axi_rresp   : out std_logic_vector(1 downto 0);
+      xu_ring_s_axi_rvalid  : out std_logic;
+      xu_ring_s_axi_rready  : in  std_logic := '0';
+      xu_ring_irq           : out std_logic;
+
 -- kl11, console ports
       have_kl11 : in integer range 0 to 4 := 1;                      -- conditional compilation - number of kl11 controllers to include. Should normally be at least 1
 
@@ -609,10 +632,45 @@ component xu is
       have_xu_enc : in integer range 0 to 1 := 0;
       have_xu_esp : in integer range 0 to 1 := 0;
 
+-- DEUNA <-> Linux frame bridge (xuring.vhd) - MUST mirror the real
+-- entity's port list in xu.vhd exactly (this is a separate hand-written
+-- component declaration, not derived automatically - see the [DRC/Synth
+-- 8-2043] "formal port not declared" error this exact mismatch caused
+-- in [[xu-ethernet-bridge]] memory the first time this bridge was added)
+      ring_s_axi_aclk    : in  std_logic;
+      ring_s_axi_aresetn : in  std_logic;
+      ring_s_axi_awaddr  : in  std_logic_vector(16 downto 0);
+      ring_s_axi_awvalid : in  std_logic;
+      ring_s_axi_awready : out std_logic;
+      ring_s_axi_wdata   : in  std_logic_vector(31 downto 0);
+      ring_s_axi_wstrb   : in  std_logic_vector(3 downto 0);
+      ring_s_axi_wvalid  : in  std_logic;
+      ring_s_axi_wready  : out std_logic;
+      ring_s_axi_bresp   : out std_logic_vector(1 downto 0);
+      ring_s_axi_bvalid  : out std_logic;
+      ring_s_axi_bready  : in  std_logic;
+      ring_s_axi_araddr  : in  std_logic_vector(16 downto 0);
+      ring_s_axi_arvalid : in  std_logic;
+      ring_s_axi_arready : out std_logic;
+      ring_s_axi_rdata   : out std_logic_vector(31 downto 0);
+      ring_s_axi_rresp   : out std_logic_vector(1 downto 0);
+      ring_s_axi_rvalid  : out std_logic;
+      ring_s_axi_rready  : in  std_logic;
+      ring_irq           : out std_logic;
+
 -- debug & blinkenlights
       tx : out std_logic;
       ifetch : out std_logic;
       iwait : out std_logic;
+
+-- BR5 arbitration diagnostics (see xu.vhd's own copy of this comment)
+      diag_rh0_br : in std_logic := '0';
+      diag_br5_state : in std_logic_vector(2 downto 0) := "000";
+      diag_cpu_psw_pri : in std_logic_vector(2 downto 0) := "000";
+      diag_cpu_bg5 : in std_logic := '0';
+      diag_cpu_addr_v : in std_logic_vector(15 downto 0) := (others => '0');
+      diag_cpu_iwait : in std_logic := '0';
+      diag_cpu_ifetch : in std_logic := '0';
 
 -- clock & reset
       cpuclk : in std_logic;
@@ -906,6 +964,8 @@ signal illhalt : std_logic;
 signal ysv : std_logic;
 signal rsv : std_logic;
 signal ifetchcopy : std_logic;
+signal iwaitcopy : std_logic;                                                  -- shadow of the 'iwait' OUT port - VHDL can't read
+                                                                                 -- it back directly, same reason ifetchcopy exists
 signal cpu_cons_run : std_logic;
 signal cpu_cons_consphy : std_logic_vector(21 downto 0);
 
@@ -1313,7 +1373,7 @@ begin
       dw8 => cpu_dw8,
       cp => cpu_cp,
       ifetch => ifetchcopy,
-      iwait => iwait,
+      iwait => iwaitcopy,
       id => cpu_id,
       init => cpu_init,
       br7 => cpu_br7,
@@ -1932,6 +1992,14 @@ begin
       bg => xu0_bg,
       int_vector => xu0_ivec,
 
+      diag_rh0_br => rh0_br,
+      diag_br5_state => conv_std_logic_vector(br5_states'pos(br5_state), 3),
+      diag_cpu_psw_pri => cpu_psw(7 downto 5),
+      diag_cpu_bg5 => cpu_bg5,
+      diag_cpu_addr_v => cpu_addr,
+      diag_cpu_iwait => iwaitcopy,
+      diag_cpu_ifetch => ifetchcopy,
+
       npr => xu0_npr,
       npg => xu0_npg,
 
@@ -1962,6 +2030,27 @@ begin
       have_xu_debug => have_xu_debug,
       have_xu_enc => have_xu_enc,
       have_xu_esp => have_xu_esp,
+
+      ring_s_axi_aclk    => xu_ring_s_axi_aclk,
+      ring_s_axi_aresetn => xu_ring_s_axi_aresetn,
+      ring_s_axi_awaddr  => xu_ring_s_axi_awaddr,
+      ring_s_axi_awvalid => xu_ring_s_axi_awvalid,
+      ring_s_axi_awready => xu_ring_s_axi_awready,
+      ring_s_axi_wdata   => xu_ring_s_axi_wdata,
+      ring_s_axi_wstrb   => xu_ring_s_axi_wstrb,
+      ring_s_axi_wvalid  => xu_ring_s_axi_wvalid,
+      ring_s_axi_wready  => xu_ring_s_axi_wready,
+      ring_s_axi_bresp   => xu_ring_s_axi_bresp,
+      ring_s_axi_bvalid  => xu_ring_s_axi_bvalid,
+      ring_s_axi_bready  => xu_ring_s_axi_bready,
+      ring_s_axi_araddr  => xu_ring_s_axi_araddr,
+      ring_s_axi_arvalid => xu_ring_s_axi_arvalid,
+      ring_s_axi_arready => xu_ring_s_axi_arready,
+      ring_s_axi_rdata   => xu_ring_s_axi_rdata,
+      ring_s_axi_rresp   => xu_ring_s_axi_rresp,
+      ring_s_axi_rvalid  => xu_ring_s_axi_rvalid,
+      ring_s_axi_rready  => xu_ring_s_axi_rready,
+      ring_irq           => xu_ring_irq,
 
 -- clock & reset
       tx => xu_debug_tx,
@@ -2526,6 +2615,7 @@ begin
 
    nclk <= not clk;
    ifetch <= ifetchcopy;
+   iwait <= iwaitcopy;
 
 -- console logic
 

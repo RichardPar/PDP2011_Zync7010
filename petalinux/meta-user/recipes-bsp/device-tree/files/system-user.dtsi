@@ -78,3 +78,27 @@
 	};
 };
 
+/*
+ * xu DEUNA <-> Linux bridge (xuring.vhd, inside xu.vhd) - third AXI-Lite
+ * slave on the same module-reference cell, same node-splitting
+ * requirement as rh_disk_uio above (the DT generator only emits one node
+ * per module-reference cell, see the long comment above). The interrupt
+ * (0x22, SPI 66) was CONFIRMED correct against a live board's generated
+ * device tree on 2026-09-05/06 - re-verify with the same dtc command
+ * above only if 02_create_bd.tcl's IRQ_F2P wiring order/count ever
+ * changes. xuring.vhd shrank from a 128K buffer-window design to a
+ * handful of registers (see [[xu-ethernet-bridge]] - the ring-walk moved
+ * into pdp11-netd.c) - reg size dropped from 0x20000 to 0x1000 to match.
+ */
+/ {
+	amba_pl {
+		ring_uio: ring_uio@43020000 {
+			compatible = "generic-uio";
+			reg = <0x43020000 0x1000>;
+			interrupt-parent = <&intc>;
+			interrupts = <0 0x22 4>;
+			linux,uio-name = "pdp11net-ring";
+		};
+	};
+};
+

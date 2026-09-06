@@ -34,8 +34,8 @@ connect_bd_net [get_bd_pins processing_system7_0/FCLK_RESET0_N] [get_bd_pins pro
 # protocol converter/the rest of the fabric. ---
 set axi_interconn_gp0 [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_interconnect axi_interconn_gp0]
 # M00=reset gpio, M01=dbg gpio, M02/M03/M04 = uartlites, M05 = RL disk
-# backend, M06 = RH (RP06) disk backend
-set_property -dict [list CONFIG.NUM_MI {7}] [get_bd_cells axi_interconn_gp0]
+# backend, M06 = RH (RP06) disk backend, M07 = xu DEUNA<->Linux ring bridge
+set_property -dict [list CONFIG.NUM_MI {8}] [get_bd_cells axi_interconn_gp0]
 
 set axi_gpio_reset [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_gpio axi_gpio_reset]
 set_property -dict [list \
@@ -79,9 +79,10 @@ connect_bd_net [get_bd_pins proc_sys_reset0/peripheral_aresetn] [get_bd_pins axi
 # IRQ_F2P (through the concat below): the Xilinx 6.1 uartlite driver REQUIRES an
 # IRQ (it has no polled mode - a driverless first attempt failed with "IRQ index
 # 0 not found"). Linux sees them as /dev/ttyUL* (raw, no getty).
-# In0..In2 = uartlites, In3 = RL disk backend, In4 = RH (RP06) disk backend
+# In0..In2 = uartlites, In3 = RL disk backend, In4 = RH (RP06) disk backend,
+# In5 = xu DEUNA<->Linux ring bridge
 set uart_irq_concat [create_bd_cell -type ip -vlnv xilinx.com:ip:xlconcat uart_irq_concat]
-set_property -dict [list CONFIG.NUM_PORTS {5}] [get_bd_cells uart_irq_concat]
+set_property -dict [list CONFIG.NUM_PORTS {6}] [get_bd_cells uart_irq_concat]
 connect_bd_net [get_bd_pins uart_irq_concat/dout] [get_bd_pins processing_system7_0/IRQ_F2P]
 
 set ser_bauds {19200 9600 9600}
@@ -116,6 +117,10 @@ connect_bd_net [get_bd_pins proc_sys_reset0/peripheral_aresetn] [get_bd_pins axi
 # --- RH (RP06) disk backend AXI-Lite slave (M06) - same pattern as M05 ---
 connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0]     [get_bd_pins axi_interconn_gp0/M06_ACLK]
 connect_bd_net [get_bd_pins proc_sys_reset0/peripheral_aresetn] [get_bd_pins axi_interconn_gp0/M06_ARESETN]
+
+# --- xu DEUNA<->Linux ring bridge AXI-Lite slave (M07) - same pattern ---
+connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0]     [get_bd_pins axi_interconn_gp0/M07_ACLK]
+connect_bd_net [get_bd_pins proc_sys_reset0/peripheral_aresetn] [get_bd_pins axi_interconn_gp0/M07_ARESETN]
 
 set reset_inv [create_bd_cell -type ip -vlnv xilinx.com:ip:util_vector_logic reset_inv]
 set_property -dict [list CONFIG.C_SIZE {1} CONFIG.C_OPERATION {not}] [get_bd_cells reset_inv]
@@ -177,6 +182,15 @@ connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0]     [get_bd_pins zyn
 connect_bd_net [get_bd_pins proc_sys_reset0/peripheral_aresetn] [get_bd_pins zynq_top_0/rh_disk_s_axi_aresetn]
 connect_bd_net [get_bd_pins zynq_top_0/rh_disk_irq] [get_bd_pins uart_irq_concat/In4]
 
+# --- xu DEUNA<->Linux ring bridge: interconnect M07 -> zynq_top_0's
+# inferred ring_s_axi AXI-Lite slave; same clock/reset; irq -> concat In5.
+# Same bridge pattern as the disk backends above, one AXI-Lite slave for
+# xuring.vhd's frame handoff to pdp11-netd - see [[xu-ethernet-bridge]].
+connect_bd_intf_net [get_bd_intf_pins axi_interconn_gp0/M07_AXI] [get_bd_intf_pins zynq_top_0/ring_s_axi]
+connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0]     [get_bd_pins zynq_top_0/ring_s_axi_aclk]
+connect_bd_net [get_bd_pins proc_sys_reset0/peripheral_aresetn] [get_bd_pins zynq_top_0/ring_s_axi_aresetn]
+connect_bd_net [get_bd_pins zynq_top_0/ring_irq] [get_bd_pins uart_irq_concat/In5]
+
 # --- AXI4 -> AXI3 protocol converter into S_AXI_HP0 (Zynq-7000 HP ports are
 # AXI3-only) ---
 set axi_protocol_convert_0 [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_protocol_converter axi_protocol_convert_0]
@@ -230,6 +244,14 @@ assign_bd_address -target_address_space [get_bd_addr_spaces processing_system7_0
 set rh_disk_seg [get_bd_addr_segs -of_objects [get_bd_intf_pins zynq_top_0/rh_disk_s_axi]]
 assign_bd_address -target_address_space [get_bd_addr_spaces processing_system7_0/Data] \
    $rh_disk_seg -offset 0x43010000 -range 64K -force
+
+# xu DEUNA<->Linux ring bridge AXI-Lite slave at 0x43020000 - pdp11-netd
+# finds it via the PetaLinux-generated UIO node, not this address directly.
+# 128K range (not 64K like the disk backends) to match xuring.vhd's wider
+# 17-bit AXI address (tx_buf + rx_buf windows are each 4K of 16-bit words).
+set ring_seg [get_bd_addr_segs -of_objects [get_bd_intf_pins zynq_top_0/ring_s_axi]]
+assign_bd_address -target_address_space [get_bd_addr_spaces processing_system7_0/Data] \
+   $ring_seg -offset 0x43020000 -range 128K -force
 
 validate_bd_design
 save_bd_design

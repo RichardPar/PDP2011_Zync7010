@@ -159,6 +159,30 @@ entity zynq_top is
       rh_disk_s_axi_rready  : in  std_logic;
       rh_disk_irq           : out std_logic;
 
+      -- xu DEUNA <-> Linux frame bridge (xuring.vhd, inside xu.vhd) -
+      -- AXI-Lite slave + interrupt, served by pdp11-netd - see
+      -- [[xu-ethernet-bridge]] memory.
+      ring_s_axi_aclk    : in  std_logic;
+      ring_s_axi_aresetn : in  std_logic;
+      ring_s_axi_awaddr  : in  std_logic_vector(16 downto 0);
+      ring_s_axi_awvalid : in  std_logic;
+      ring_s_axi_awready : out std_logic;
+      ring_s_axi_wdata   : in  std_logic_vector(31 downto 0);
+      ring_s_axi_wstrb   : in  std_logic_vector(3 downto 0);
+      ring_s_axi_wvalid  : in  std_logic;
+      ring_s_axi_wready  : out std_logic;
+      ring_s_axi_bresp   : out std_logic_vector(1 downto 0);
+      ring_s_axi_bvalid  : out std_logic;
+      ring_s_axi_bready  : in  std_logic;
+      ring_s_axi_araddr  : in  std_logic_vector(16 downto 0);
+      ring_s_axi_arvalid : in  std_logic;
+      ring_s_axi_arready : out std_logic;
+      ring_s_axi_rdata   : out std_logic_vector(31 downto 0);
+      ring_s_axi_rresp   : out std_logic_vector(1 downto 0);
+      ring_s_axi_rvalid  : out std_logic;
+      ring_s_axi_rready  : in  std_logic;
+      ring_irq           : out std_logic;
+
       -- AXI4 master to PS DDR3 (through an AXI4->AXI3 protocol converter to
       -- S_AXI_HP0 at the BD level)
       m_axi_awaddr  : out std_logic_vector(31 downto 0);
@@ -322,6 +346,29 @@ begin
          rh_disk_s_axi_rvalid  => rh_disk_s_axi_rvalid,
          rh_disk_s_axi_rready  => rh_disk_s_axi_rready,
          rh_disk_irq           => rh_disk_irq,
+
+         have_xu => 1,
+
+         xu_ring_s_axi_aclk    => ring_s_axi_aclk,
+         xu_ring_s_axi_aresetn => ring_s_axi_aresetn,
+         xu_ring_s_axi_awaddr  => ring_s_axi_awaddr,
+         xu_ring_s_axi_awvalid => ring_s_axi_awvalid,
+         xu_ring_s_axi_awready => ring_s_axi_awready,
+         xu_ring_s_axi_wdata   => ring_s_axi_wdata,
+         xu_ring_s_axi_wstrb   => ring_s_axi_wstrb,
+         xu_ring_s_axi_wvalid  => ring_s_axi_wvalid,
+         xu_ring_s_axi_wready  => ring_s_axi_wready,
+         xu_ring_s_axi_bresp   => ring_s_axi_bresp,
+         xu_ring_s_axi_bvalid  => ring_s_axi_bvalid,
+         xu_ring_s_axi_bready  => ring_s_axi_bready,
+         xu_ring_s_axi_araddr  => ring_s_axi_araddr,
+         xu_ring_s_axi_arvalid => ring_s_axi_arvalid,
+         xu_ring_s_axi_arready => ring_s_axi_arready,
+         xu_ring_s_axi_rdata   => ring_s_axi_rdata,
+         xu_ring_s_axi_rresp   => ring_s_axi_rresp,
+         xu_ring_s_axi_rvalid  => ring_s_axi_rvalid,
+         xu_ring_s_axi_rready  => ring_s_axi_rready,
+         xu_ring_irq           => ring_irq,
 
          bootrom => boot_pdp2011,  -- auto-boot: tries rk, rl, rp in that order.
                                 -- Was a known bug up to 2026-08-14: if RL0 wasn't
