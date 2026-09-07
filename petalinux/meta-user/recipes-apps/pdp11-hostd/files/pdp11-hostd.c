@@ -200,6 +200,21 @@ static net_t g_net = {
    .uiofd = -1, .tapfd = -1,
 };
 
+/* Used by the RX filter further down, but reported by build_status_json()
+ * which sits above it, so they are defined here.
+ *
+ * guest_ip: the guest's own IPv4 address, learned by snooping what it
+ * transmits (it is configured inside the guest with ifconfig, so we are
+ * never told it). Big-endian exactly as it appears on the wire; 0 = not
+ * yet known. Written only by serve_net's thread, read only by rx_thread;
+ * a 32-bit aligned load/store is atomic on this target, and the worst case
+ * of a stale read is one extra frame accepted or dropped. */
+static volatile uint32_t guest_ip = 0;
+
+/* RX filter stats, for judging whether the guest is being buried in noise. */
+static volatile unsigned long rx_acc_unicast, rx_acc_bcast,
+                              rx_drop_bcast, rx_drop_other;
+
 /* The station address xu.vhd's embedded microcode (xubw.mac) latches from
  * the first rx_buf header it ever sees (dbia/dlaa start zeroed in ROM, see
  * the "tst dbia" bootstrap around xubw.mac line 125) and the guest driver
@@ -600,7 +615,10 @@ static void build_status_json(char *b, size_t n)
             "\"outer_npr\":%s,\"outer_npg\":%s,"
             "\"xubm_npr\":%s,\"xubm_npg\":%s,"
             "\"cpu_npr\":%s,\"cpu_npg\":%s,"
-            "\"ifetch_count\":%u,\"xubm_run_count\":%u}",
+            "\"ifetch_count\":%u,\"xubm_run_count\":%u,"
+            "\"guest_ip\":\"%u.%u.%u.%u\","
+            "\"rx_acc_unicast\":%lu,\"rx_acc_bcast\":%lu,"
+            "\"rx_drop_bcast\":%lu,\"rx_drop_other\":%lu}",
             g_net.present ? "true" : "false", g_net.ifname, g_net.heartbeat_last,
             g_net.heartbeat_alive ? "true" : "false",
             (unsigned long long)(g_net.heartbeat_last_change_ms ?
@@ -614,7 +632,10 @@ static void build_status_json(char *b, size_t n)
             (debug2 & 0x800000) ? "true" : "false",
             (debug2 & 0x1000000) ? "true" : "false",
             (debug2 & 0x2000000) ? "true" : "false",
-            debug3 & 0xffff, (debug3 >> 16) & 0xffff);
+            debug3 & 0xffff, (debug3 >> 16) & 0xffff,
+            (guest_ip >> 24) & 0xff, (guest_ip >> 16) & 0xff,
+            (guest_ip >> 8) & 0xff, guest_ip & 0xff,
+            rx_acc_unicast, rx_acc_bcast, rx_drop_bcast, rx_drop_other);
     }
     snprintf(b + o, n - o, "}\n");
 }
@@ -1130,11 +1151,61 @@ static pthread_mutex_t rxq_lock = PTHREAD_MUTEX_INITIALIZER;
  * of MAC learning - faithfully matching real hardware means dropping all
  * of that here rather than forwarding it into one of the guest's few
  * receive descriptors. */
+static uint32_t rd_be32(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8)  |  (uint32_t)p[3];
+}
+
+/* Learn the guest's IP from a frame it just sent: ARP sender-protocol-address
+ * (offset 28) or IPv4 source address (offset 26). */
+static void learn_guest_ip(const uint8_t *buf, int len)
+{
+    uint32_t ip = 0;
+    if (len >= 14 && buf[12] == 0x08 && buf[13] == 0x06) {          /* ARP  */
+        if (len >= 32) ip = rd_be32(buf + 28);
+    } else if (len >= 14 && buf[12] == 0x08 && buf[13] == 0x00) {   /* IPv4 */
+        if (len >= 30) ip = rd_be32(buf + 26);
+    }
+    if (ip == 0 || ip == 0xffffffffu) return;
+    if (ip != guest_ip) {
+        log_msg("NET: learned guest IP %u.%u.%u.%u (from its own traffic)",
+                (ip >> 24) & 0xff, (ip >> 16) & 0xff, (ip >> 8) & 0xff, ip & 0xff);
+        guest_ip = ip;
+    }
+}
+
+/* Address filtering, as a real DEUNA does in hardware - our own address or
+ * broadcast - but TIGHTENED for a modern LAN. tap0 is a bridge member, so it
+ * sees the full broadcast/multicast racket (ARP for every other host, mDNS,
+ * SSDP, ...). A real 10base-T segment carried far less of it, and every one
+ * of those frames costs the guest one of its handful of receive descriptors
+ * plus an interrupt its slow handler must service - measured on hardware
+ * dropping genuine ICMP replies that had already been handed to the core.
+ *
+ * So: unicast to us is always accepted; broadcast is accepted only when it
+ * is an ARP actually asking about the guest's own IP. Until we have learned
+ * that IP we accept all ARP (fail open), otherwise the guest could never be
+ * resolved in the first place. Non-ARP broadcast is dropped outright. */
 static int rx_addressed_to_us(const uint8_t *buf, int len)
 {
     if (len < 6) return 0;
-    if (memcmp(buf, xu_mac, 6) == 0) return 1;
-    if (memcmp(buf, "\xff\xff\xff\xff\xff\xff", 6) == 0) return 1;
+    if (memcmp(buf, xu_mac, 6) == 0) { rx_acc_unicast++; return 1; }
+
+    if (memcmp(buf, "\xff\xff\xff\xff\xff\xff", 6) == 0) {
+        if (len >= 14 && buf[12] == 0x08 && buf[13] == 0x06) {      /* ARP */
+            uint32_t gip = guest_ip;
+            /* target protocol address sits at offset 38 */
+            if (gip == 0 || len < 42 || rd_be32(buf + 38) == gip) {
+                rx_acc_bcast++;
+                return 1;
+            }
+        }
+        rx_drop_bcast++;
+        return 0;
+    }
+
+    rx_drop_other++;
     return 0;
 }
 
@@ -1317,8 +1388,11 @@ static void *serve_net(void *arg)
                 ssize_t wr = write(n->tapfd, txbytes + HDRLEN, (size_t)framelen);
                 if (wr < 0)
                     log_msg("NET: write(tap) failed: %s", strerror(errno));
-                else if (verbose)
-                    log_msg("NET: TX: %d bytes forwarded to %s", framelen, n->ifname);
+                else {
+                    learn_guest_ip(txbytes + HDRLEN, framelen);
+                    if (verbose)
+                        log_msg("NET: TX: %d bytes forwarded to %s", framelen, n->ifname);
+                }
             } else if (framelen > 0) {
                 log_msg("NET: TX: bad/oversized frame length %d (txlen=%d) - dropped",
                          framelen, txlen);
