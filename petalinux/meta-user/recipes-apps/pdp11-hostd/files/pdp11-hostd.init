@@ -1,0 +1,57 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          pdp11-hostd
+# Required-Start:    $local_fs
+# Required-Stop:     $local_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: PDP-11 host server (RL/RH disks + XU network bridge, all over UIO)
+### END INIT INFO
+
+DAEMON=/usr/bin/pdp11-hostd
+# Seed images, only used the FIRST time (no persistent config yet - see
+# CONFIG below). Once the daemon has run once, CONFIG remembers which image
+# is loaded in which unit and these are ignored on every later boot.
+DL0=/srv/pdp11/dl0.img
+DL1=/srv/pdp11/dl1.img
+DB0=/srv/pdp11/db0.img
+CONFIG=/srv/pdp11/diskd.conf
+LOG=/var/log/pdp11-hostd.log
+
+case "$1" in
+  start)
+    if [ ! -f "$CONFIG" ] && [ ! -f "$DL0" ]; then
+      echo "pdp11-hostd: no persistent config ($CONFIG) and no seed DL0 image ($DL0) - not starting"
+      exit 0
+    fi
+    IMGS=""
+    [ -f "$DL0" ] && IMGS="$IMGS $DL0"
+    [ -f "$DL1" ] && IMGS="$IMGS $DL1"
+    RHARG=""
+    [ -f "$DB0" ] && RHARG="-R $DB0"
+    # match the running DAEMON by its binary path, not this init script
+    # (whose own argv contains "pdp11-hostd" too)
+    if ps 2>/dev/null | grep -q '[u]sr/bin/pdp11-hostd'; then
+      echo "pdp11-hostd already running - not starting a second (would double-reset)"
+      exit 0
+    fi
+    echo "Starting pdp11-hostd (config $CONFIG, seed$IMGS $RHARG, resetting the PDP-11)"
+    # -r pulses the PDP-11-only reset once we are ready, so the PDP-11 boots
+    # from the files with us already serving. -c picks the persistent config,
+    # which wins over the seed images below once it exists. $IMGS/$RHARG are
+    # intentionally unquoted so they split into separate arguments.
+    nohup "$DAEMON" -r -l "$LOG" -c "$CONFIG" $RHARG $IMGS >/dev/null 2>&1 &
+    ;;
+  stop)
+    echo "Stopping pdp11-hostd"
+    for p in $(ps | grep '[u]sr/bin/pdp11-hostd' | awk '{print $1}'); do kill "$p"; done
+    ;;
+  restart)
+    "$0" stop; sleep 1; "$0" start
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart}"
+    exit 1
+    ;;
+esac
+exit 0

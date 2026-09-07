@@ -140,7 +140,7 @@ entity unibus is
       have_xu_esp : in integer range 0 to 1 := 0;                    -- include frontend for esp32
 
       -- AXI-Lite "virtual ESP32" backend (xuaxi.vhd via xu.vhd), active
-      -- when have_xu_esp=1 - pdp11-espd on the Zynq PS instead of a
+      -- when have_xu_esp=1 - pdp11-hostd on the Zynq PS instead of a
       -- physical ESP32 over SPI
       net_s_axi_aclk    : in  std_logic := '0';
       net_s_axi_aresetn : in  std_logic := '1';

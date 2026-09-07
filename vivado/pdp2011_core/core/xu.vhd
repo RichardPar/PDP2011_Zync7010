@@ -57,7 +57,7 @@ entity xu is
       xu_srdy : in std_logic;
 
 -- AXI-Lite "virtual ESP32" backend (xuaxi.vhd) - active when have_xu_esp=1,
--- talks to pdp11-espd on the Zynq PS instead of a physical ESP32 over SPI
+-- talks to pdp11-hostd on the Zynq PS instead of a physical ESP32 over SPI
       net_s_axi_aclk    : in  std_logic := '0';
       net_s_axi_aresetn : in  std_logic := '1';
       net_s_axi_awaddr  : in  std_logic_vector(15 downto 0) := (others => '0');
@@ -240,7 +240,7 @@ end component;
 -- upstream xubf.vhd (physical bit-banged SPI to a real ESP32 - no longer
 -- instantiated here, see docs/xu-networking-plan.md). Same XF/RT/RL/SRDY
 -- register contract on the local unibus, but the SPI pins are replaced by
--- an AXI-Lite slave + irq to a Linux daemon (pdp11-espd) on the Zynq PS.
+-- an AXI-Lite slave + irq to a Linux daemon (pdp11-hostd) on the Zynq PS.
 component xuaxi is
    port(
       base_addr : in std_logic_vector(17 downto 0);
@@ -264,6 +264,19 @@ component xuaxi is
       bus_master_nxm : in std_logic;
 
       have_xu_esp : in integer range 0 to 1 := 0;
+
+      -- diagnostic-only taps into xu.vhd's PCSR0/PCSR1 (the guest-visible
+      -- DEUNA control/status registers) and its own OUTER (main-unibus-
+      -- facing) npr/npg - see the DEBUG2 register comment below.
+      dbg_pcsr0 : in std_logic_vector(15 downto 0) := (others => '0');
+      dbg_pcsr1_state : in std_logic_vector(3 downto 0) := (others => '0');
+      dbg_outer_npr : in std_logic := '0';
+      dbg_outer_npg : in std_logic := '0';
+      dbg_ifetch : in std_logic := '0';
+      dbg_xubm_npr : in std_logic := '0';
+      dbg_xubm_npg : in std_logic := '0';
+      dbg_cpu_npr : in std_logic := '0';
+      dbg_cpu_npg : in std_logic := '0';
 
       s_axi_aclk    : in  std_logic;
       s_axi_aresetn : in  std_logic;
@@ -436,6 +449,7 @@ signal xubl_mosi : std_logic;
 signal xubl_addr_match : std_logic;
 signal xubl_dati : std_logic_vector(15 downto 0);
 signal xubl_npr : std_logic;
+signal xubl_npg : std_logic;
 
 signal localunibus_busmaster_xubl_addr : std_logic_vector(17 downto 0);
 signal localunibus_busmaster_xubl_dato : std_logic_vector(15 downto 0);
@@ -449,6 +463,7 @@ signal localunibus_busmaster_xubl_control_dato : std_logic;
 signal xuaxi_addr_match : std_logic;
 signal xuaxi_dati : std_logic_vector(15 downto 0);
 signal xuaxi_npr : std_logic;
+signal xuaxi_npg : std_logic;
 
 signal localunibus_busmaster_xuaxi_addr : std_logic_vector(17 downto 0);
 signal localunibus_busmaster_xuaxi_dato : std_logic_vector(15 downto 0);
@@ -456,8 +471,15 @@ signal localunibus_busmaster_xuaxi_control_dati : std_logic;
 signal localunibus_busmaster_xuaxi_control_dato : std_logic;
 
 signal xubm_addr_match : std_logic;
+-- shadow of the top-level 'npr' OUTPUT port, needed only because VHDL
+-- forbids reading back an out-mode port from within its own architecture -
+-- xubm0 still drives the real npr output directly (see 'npr <= xubm_outer_npr'
+-- below); this exists solely so the DEBUG2 diagnostic tap can see the same
+-- value.
+signal xubm_outer_npr : std_logic;
 signal xubm_dati : std_logic_vector(15 downto 0);
 signal xubm_npr : std_logic;
+signal xubm_npg : std_logic;
 
 signal xubm_addr : std_logic_vector(17 downto 0);
 signal xubm_dato : std_logic_vector(15 downto 0);
@@ -732,7 +754,7 @@ begin
       base_addr => o"777000",
 
       npr => xubl_npr,
-      npg => cpu_npg,
+      npg => xubl_npg,
 
       bus_addr_match => xubl_addr_match,
       bus_addr => localunibus_addr,
@@ -767,7 +789,7 @@ begin
       base_addr => o"777000",
 
       npr => xuaxi_npr,
-      npg => cpu_npg,
+      npg => xuaxi_npg,
 
       bus_addr_match => xuaxi_addr_match,
       bus_addr => localunibus_addr,
@@ -785,6 +807,21 @@ begin
       bus_master_nxm => localbusmaster_nxmabort,
 
       have_xu_esp => have_xu_esp,
+
+      -- diagnostic-only taps, straight off the existing pcsr0/pcsr1 signals
+      -- and xu.vhd's own OUTER (main-unibus-facing) npr/npg entity ports -
+      -- see the DEBUG2 register comment in xuaxi.vhd for why these were
+      -- added and what each field means.
+      dbg_pcsr0 => pcsr0_seri & pcsr0_pcei & pcsr0_rxi & pcsr0_txi & pcsr0_dni & pcsr0_rcbi & "0" & pcsr0_usci
+         & pcsr0_intr & pcsr0_inte & pcsr0_rset & pcsr0_pcmw & pcsr0_port_command,
+      dbg_pcsr1_state => pcsr1_state,
+      dbg_outer_npr => xubm_outer_npr,
+      dbg_outer_npg => npg,
+      dbg_ifetch => ifetchcopy,
+      dbg_xubm_npr => xubm_npr,
+      dbg_xubm_npg => xubm_npg,
+      dbg_cpu_npr => cpu_npr,
+      dbg_cpu_npg => cpu_npg,
 
       s_axi_aclk    => net_s_axi_aclk,
       s_axi_aresetn => net_s_axi_aresetn,
@@ -823,7 +860,7 @@ begin
    xubm0: xubm port map(
       base_addr => o"777100",
 
-      npr => npr,
+      npr => xubm_outer_npr,
       npg => npg,
 
       bus_addr_match => xubm_addr_match,
@@ -842,7 +879,7 @@ begin
       bus_master_nxm => bus_master_nxm,
 
       localbus_npr => xubm_npr,
-      localbus_npg => cpu_npg,
+      localbus_npg => xubm_npg,
 
       localbus_master_addr => localunibus_busmaster_xubm_addr,
       localbus_master_dati => localunibus_busmaster_dati,
@@ -933,10 +970,27 @@ begin
 
    cpu_npr <= '1' when xubl_npr = '1' or xuaxi_npr = '1' or xubm_npr = '1' else '0';
 
+   -- Per-master grant, mirroring the priority mux above exactly (xubl >
+   -- xuaxi > xubm). cpu_npg alone is a SHARED, undifferentiated grant line -
+   -- feeding it raw into every requester's own npg port (as this file did
+   -- originally) means a lower-priority master whose npr happens to overlap
+   -- a higher-priority master's npr sees npg='1' on its own port and
+   -- believes it has been granted the bus, even though the mux above is
+   -- actually routing a DIFFERENT master's address/data onto the shared
+   -- local bus that cycle - silently corrupting/desyncing the loser's
+   -- transfer with no abort, no error, nothing observable from the PS side.
+   -- This was latent and never exercised before this session (have_xu was
+   -- always 0), and only became reachable once xuaxi0 introduced a second
+   -- real local-bus master alongside xubm0's own outer<->inner bridging.
+   xubl_npg  <= '1' when cpu_npg = '1' and xubl_npr = '1' else '0';
+   xuaxi_npg <= '1' when cpu_npg = '1' and xubl_npr = '0' and xuaxi_npr = '1' else '0';
+   xubm_npg  <= '1' when cpu_npg = '1' and xubl_npr = '0' and xuaxi_npr = '0' and xubm_npr = '1' else '0';
+
    bus_master_addr <= xubm_addr;
    bus_master_dato <= xubm_dato;
    bus_master_control_dati <= xubm_control_dati;
    bus_master_control_dato <= xubm_control_dato;
+   npr <= xubm_outer_npr;
 
 -- reset signal, force exclusion of components if xu is not configured
 

@@ -16,7 +16,7 @@ spark for wanting a real PDP-11 running again in the first place.
 ## Building
 
 Everything is built by the top-level **`./build.sh`** — bitstream, then the full
-PetaLinux (kernel, rootfs, `BOOT.BIN`), including the rootfs apps `pdp11-diskd`,
+PetaLinux (kernel, rootfs, `BOOT.BIN`), including the rootfs apps `pdp11-hostd`,
 `tu58fs`, `picocom`, and `pdp11-scripts`. Every artifact lands flat in `deploy/`:
 
 | File | From |
@@ -27,7 +27,7 @@ PetaLinux (kernel, rootfs, `BOOT.BIN`), including the rootfs apps `pdp11-diskd`,
 | `image.ub` | kernel + device tree + ramdisk FIT image |
 | `boot.scr` | u-boot boot script |
 | `rootfs.ext4` / `rootfs.tar.gz` / `rootfs.cpio.gz` | the PetaLinux rootfs, three packagings |
-| `pdp11-diskd` | just the daemon binary, for a fast redeploy (see `build_pdp11_diskd.sh`) |
+| `pdp11-hostd` | just the daemon binary, for a fast redeploy (see `build_pdp11_hostd.sh`) |
 
 `BOOT.BIN`/`image.ub`/`boot.scr` go on the boot card's FAT32 partition;
 `rootfs.*` becomes the ext4 partition's contents — see "Deploying" below.
@@ -103,7 +103,7 @@ on the PS now (RL at `/srv/pdp11/dl0.img`/`dl1.img`, RH0/RP06 at
 The boot card has two partitions: FAT32 (`BOOT.BIN`, `image.ub`, `boot.scr`) and
 ext4 (rootfs). `scripts/flash_sd_card.sh` writes a fresh card. Then place the
 disk images under `/srv/pdp11/` on the rootfs (each RL unit is a 10 MB
-`.dsk`, `db0.img` is ~166 MB); `pdp11-diskd` auto-starts at boot, resets the
+`.dsk`, `db0.img` is ~166 MB); `pdp11-hostd` auto-starts at boot, resets the
 PDP-11, and serves them (see "File-backed RL disk" / "File-backed RH/RP06
 disk"). After the first boot it remembers whatever's loaded where in
 `/srv/pdp11/diskd.conf` — see "Swapping disks without a reboot" — so these are
@@ -250,12 +250,12 @@ threaded up `rl11 -> unibus -> zynq_top -> block design` and lives at
 
 An RL02 sector is really 256 bytes (128 words). The original author padded each
 one out to a 512-byte SD block so it lined up with a physical card; on a file
-that padding is dead weight, so `pdp11-diskd` serves the native 256 (`BLOCK *
+that padding is dead weight, so `pdp11-hostd` serves the native 256 (`BLOCK *
 256`, low 128 words). Half the size, half the I/O — and it makes the image a
 plain RL02 `.dsk`, with consecutive sectors adjacent so RT-11's 512-byte blocks
 are contiguous. Nothing in the VHDL changed, just the daemon.
 
-**`pdp11-diskd`** (a UIO daemon, recipe in `meta-user/recipes-apps`) waits on
+**`pdp11-hostd`** (a UIO daemon, recipe in `meta-user/recipes-apps`) waits on
 the interrupt, `pread`/`pwrite`s the image, and moves the sector through the
 buffer. It's exposed as a UIO device via `system-user.dtsi` (`&zynq_top_0` ->
 `compatible = "generic-uio"`, `linux,uio-name = "pdp11disk"`), the kernel's
@@ -267,7 +267,7 @@ boot comes straight up into RT-11 from the file.
 **Geometry:** each RL unit is 40960 sectors = **10 MB** (a standard RL02 `.dsk`).
 The `BLOCK` register is a linear sector index across units; the daemon splits it
 into `unit = BLOCK / 40960` and `local = BLOCK % 40960`, and serves **each unit
-from its own image file** (`pdp11-diskd … /srv/pdp11/dl0.img /srv/pdp11/dl1.img`
+from its own image file** (`pdp11-hostd … /srv/pdp11/dl0.img /srv/pdp11/dl1.img`
 — positional args map to DL0, DL1, …). So DL0 and DL1 are two separate 10 MB
 files now, not one blob. Only two are usable anyway; DL2/DL3 hang the core (see
 "Not done").
@@ -279,7 +279,7 @@ RH/RP06 disk" below.
 
 ## Swapping disks without a reboot
 
-`pdp11-diskd` runs a small REST API (port 8080 by default) so you can pull an
+`pdp11-hostd` runs a small REST API (port 8080 by default) so you can pull an
 image out of a unit and drop a different one in while RT-11/2.11BSD keeps
 running — swap between an RT-11 pack, a games pack, XXDP, an RP06 pack,
 whatever, without touching the board. Covers both busses, RL11 (DL0..DL3) and
@@ -289,7 +289,7 @@ bus+unit like `rl0`/`rh0`, or a bare number, which still means RL (`unit=1` ==
 DL1) for backward compatibility.
 
 Raw curl works, but there are wrappers. On the board, `dlctl` (ships with the
-`pdp11-diskd` recipe, which pulls in `curl`):
+`pdp11-hostd` recipe, which pulls in `curl`):
 
 ```
 dlctl status
@@ -340,7 +340,7 @@ Every load/unload gets written to a persistent config file (`-c`, default
 `/srv/pdp11/diskd.conf`) and replayed on the daemon's next start, so a swap
 survives a reboot instead of reverting to the init script's seed images.
 
-(Fixed bug: `pdp11-diskd` used to refuse to start at all with RL0 unloaded —
+(Fixed bug: `pdp11-hostd` used to refuse to start at all with RL0 unloaded —
 a leftover check from its RL-only days. Unloading DL0/DL1 to boot RP06 is a
 normal persisted state now, so that check is gone.)
 
@@ -349,7 +349,7 @@ normal persisted state now, so that check is gone.)
 RH11/RP06 (`DB:` at 0176700, vector 254) works the same way RL11 does: its
 `sdspi` instance is swapped for its own **`sddisk.vhd`** (a second, separate
 instance of the same bridge — each disk gets one), backed by an image file on
-the PS via `pdp11-diskd`. RH11's sector is a native 512-byte/256-word block,
+the PS via `pdp11-hostd`. RH11's sector is a native 512-byte/256-word block,
 so unlike the RL11 there's no 256→512 padding to undo. Lives at `0x43010000`
 on `M_AXI_GP0`, interrupt on `IRQ_F2P[4]`, same register map as the RL bridge
 above. The core only implements one RH drive — `rh11.vhd`'s busmaster logic
@@ -371,7 +371,7 @@ see the comment on the node for how to refresh it.
 rp: for each it first checks the controller's CSR responds on the bus at all
 (a UNIBUS-timeout trap through vector 4 skips straight to the next one if not),
 then attempts an actual read. Up to 2026-08-14 a real read error (device
-present but nothing usable, e.g. an unloaded `pdp11-diskd` unit) didn't fall
+present but nothing usable, e.g. an unloaded `pdp11-hostd` unit) didn't fall
 through — it just `reset` and retried the *same* device forever. Fixed
 2026-09-03: `rkgo`/`rlgo`/`rpgo`'s error paths in
 `vivado/pdp2011_core/core/m9312h-pdp2011.mac` now jump to the next device's
@@ -441,14 +441,14 @@ scripts/
   flash_sd_card.sh, flash_bootbin_net.sh, deploy_petalinux_net.sh   deploy
   rl0_boot.sh, rp06_boot.sh, rh11_probe.sh   runtime helpers
 disks/
-  rtv53_sd.img, xxdp25_sd.img   RL02 images (served by pdp11-diskd as dl0.img/dl1.img)
+  rtv53_sd.img, xxdp25_sd.img   RL02 images (served by pdp11-hostd as dl0.img/dl1.img)
   211bsd-rp06.img                RP06 image (served as db0.img, see "File-backed RH/RP06 disk")
 deploy/
   pdp2011_zynq.bit, pdp2011_zynq_wrapper.xsa   Vivado output
   BOOT.BIN, image.ub, boot.scr, rootfs.tar.gz  PetaLinux output
 ```
 
-The PetaLinux app recipes (`pdp11-diskd`, `tu58fs`, `picocom`, `pdp11-scripts`),
+The PetaLinux app recipes (`pdp11-hostd`, `tu58fs`, `picocom`, `pdp11-scripts`),
 kernel config, and device-tree overrides live in the PetaLinux project's
 `project-spec/meta-user`, which `build.sh`/`docker/plnx.sh` create and build
 outside this tree (default `../.petalinux-docker/work`, overridable).

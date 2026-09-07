@@ -17,7 +17,7 @@
 -- This module keeps that exact XF/RT/RL/SRDY register contract (so the
 -- already-assembled xubw.mac needs zero changes) but replaces the SPI shift
 -- state machine with a small pair of buffers exposed over AXI-Lite to a
--- Linux daemon (pdp11-espd) on the Zynq PS, which reimplements the real
+-- Linux daemon (pdp11-hostd) on the Zynq PS, which reimplements the real
 -- ESP32 firmware's exact framing (xuesp/main/app_spitask.c: hdrlen=12,
 -- receive-direction magic 0xaa 0x55, transmit-direction magic 0xa0 0xa0,
 -- confirmed against xubw.mac's own rfmgk1/rfmgk2/tfmgk constants) against a
@@ -71,10 +71,74 @@
 --                   rest of the fixed window is stale left-over content,
 --                   exactly like the real ESP32's fixed-size sendbuf/
 --                   recvbuf.
---   0x1000  STATUS (read)   bit0 = tx_pending (a fresh run is waiting)
---   0x1004  LEN    (read)   RL for the pending run, in bytes
---   0x1008  DONE   (write)  daemon writes here once txbuf is drained AND
---                           rxbuf has been refreshed - de-asserts irq
+--   0x1000  STATUS    (read)   bit0 = tx_pending (a fresh run is waiting)
+--   0x1004  LEN       (read)   RL for the pending run, in bytes
+--   0x1008  DONE      (write)  daemon writes here once txbuf is drained AND
+--                               rxbuf has been refreshed - de-asserts irq
+--   0x100C  HEARTBEAT (read)   free-running counter, incremented every clk
+--                               (xu0's own clock) cycle - independent of
+--                               run/state/guest traffic. A daemon polling
+--                               this and seeing it change proves xu0's
+--                               clock/logic domain is alive even when idle;
+--                               a stuck value means xu0 itself is wedged
+--                               (as opposed to the guest simply being quiet).
+--                               NOTE: this only proves clk is toggling and
+--                               reset isn't held - it does NOT prove the
+--                               embedded microcode is making useful
+--                               progress (it would keep ticking even if
+--                               cpu0 were spinning forever in its own
+--                               software wait-loop). See DEBUG1/RUNSTATS
+--                               below for that.
+--   0x1010  DEBUG1    (read)   bit0-2 = current DMA FSM state (0=s_idle,
+--                               1=s_tx_req, 2=s_tx_cap, 3=s_wait_daemon,
+--                               4=s_rx_wait_grant, 5=s_rx_req, 6=s_rx_cap,
+--                               7=s_done), bit3 = srdy (ACTIVE LOW - 0
+--                               means idle/ready, see the srdy assignment)
+--   0x1014  RUNSTATS  (read)   bits(15:0) = run_start_count (incremented
+--                               each time the local register interface
+--                               triggers a run, i.e. RT gets written),
+--                               bits(31:16) = run_done_count (incremented
+--                               each time a run reaches s_done). Stuck at
+--                               start==done==0 across an attempted transmit
+--                               means the embedded microcode never wrote RT
+--                               at all; start advancing but done not means
+--                               a run is stuck in the DMA/daemon round trip
+--                               (check DEBUG1's state); both advancing
+--                               together but the guest still hangs points
+--                               at the completion notification back to the
+--                               OUTER guest CPU, entirely outside this file.
+--   0x1018  DEBUG2    (read)   bits(15:0) = PCSR0 (the guest-visible DEUNA
+--                               control/status register - same bit layout
+--                               the guest driver itself reads: seri pcei
+--                               rxi txi dni rcbi 0 usci intr inte rset pcmw
+--                               port_command(4)); bits(19:16) = PCSR1's
+--                               port-state nibble (the DEUNA port-command
+--                               state machine - what step of GETPCBB/
+--                               GETCMD/etc the guest<->microcode handshake
+--                               is on); bit20 = xu0's own OUTER (main-
+--                               unibus-facing, via xubm0) npr request; bit21
+--                               = the matching outer npg grant. If npr=1 and
+--                               npg=0 is stuck, xu0 is waiting on the SAME
+--                               outer NPR arbiter RH/RL also use for their
+--                               own DMA - a different instance of the class
+--                               of bug fixed in the local-unibus arbiter
+--                               above, on a bus this module has no fix for.
+--                               bit22 = xubm0's LOCAL (xu0-internal) bus
+--                               request, bit23 = its grant; bit24 = cpu0's
+--                               own npr, bit25 = its npg.
+--   0x101C  DEBUG3    (read)   bits(15:0) = ifetch_count - counts instruction
+--                               fetches by xu0's embedded cpu0, so a STUCK
+--                               value means the microcode has trapped or
+--                               halted (HEARTBEAT deliberately cannot tell
+--                               us this: it ticks off the raw clock and
+--                               keeps counting even if cpu0 is dead or
+--                               spinning). bits(31:16) = xubm_run_count -
+--                               counts each time xubm0 asks for xu0's local
+--                               bus, i.e. each attempt by the microcode to
+--                               move data to/from GUEST memory. If the
+--                               guest is retrying PDMD forever and this
+--                               never advances, the microcode is not even
+--                               attempting the transmit-ring/PCB fetch.
 --
 
 library IEEE;
@@ -106,7 +170,24 @@ entity xuaxi is
 
       have_xu_esp : in integer range 0 to 1 := 0;
 
-      -- AXI-Lite slave (PS / pdp11-espd side)
+      -- diagnostic-only taps into xu.vhd's PCSR0/PCSR1 (the guest-visible
+      -- DEUNA control/status registers) and its own OUTER (main-unibus-
+      -- facing) npr/npg - see the DEBUG2 register comment above.
+      dbg_pcsr0 : in std_logic_vector(15 downto 0) := (others => '0');
+      dbg_pcsr1_state : in std_logic_vector(3 downto 0) := (others => '0');
+      dbg_outer_npr : in std_logic := '0';
+      dbg_outer_npg : in std_logic := '0';
+
+      -- xu0-internal taps: is the embedded cpu0 actually executing, and is
+      -- xubm0 (the microcode's guest-memory mover) ever being asked to run
+      -- and ever being granted xu0's own local bus? See DEBUG3 below.
+      dbg_ifetch : in std_logic := '0';
+      dbg_xubm_npr : in std_logic := '0';
+      dbg_xubm_npg : in std_logic := '0';
+      dbg_cpu_npr : in std_logic := '0';
+      dbg_cpu_npg : in std_logic := '0';
+
+      -- AXI-Lite slave (PS / pdp11-hostd side)
       s_axi_aclk    : in  std_logic;
       s_axi_aresetn : in  std_logic;
       s_axi_awaddr  : in  std_logic_vector(15 downto 0);
@@ -177,7 +258,7 @@ architecture implementation of xuaxi is
 
    type state_t is (
       s_idle,
-      s_tx_req, s_tx_cap,
+      s_tx_req, s_tx_wait, s_tx_cap,
       s_wait_daemon,
       s_rx_wait_grant, s_rx_req, s_rx_cap,
       s_done
@@ -196,7 +277,41 @@ architecture implementation of xuaxi is
    -- exactly like sddisk.vhd's read_done/write_done.
    signal run_done_s : std_logic_vector(1 downto 0) := "00";
 
-   signal srdy : std_logic;                            -- '1' = idle, ready for the next run
+   signal srdy : std_logic;                            -- ACTIVE LOW: '0' = idle/ready for the next run
+
+   -- run-lifecycle counters (clk domain, driven only by the DMA process
+   -- below) - diagnostic only, mirrors heartbeat_ctr's reasoning. A hang
+   -- with run_start_count stuck means the embedded microcode never even
+   -- wrote RT to trigger a transfer; run_start_count advancing but
+   -- run_done_count not means a run got stuck somewhere in the DMA/daemon
+   -- round trip (most likely candidate: npr/npg never granted); both
+   -- advancing together but the guest still wedged points at the completion
+   -- notification back to the OUTER guest CPU (xu.vhd's own PCSR/interrupt
+   -- logic), entirely outside this module.
+   signal run_start_count : std_logic_vector(15 downto 0) := (others => '0');
+   signal run_done_count  : std_logic_vector(15 downto 0) := (others => '0');
+
+   -- xu0-internal activity counters (clk domain, own tiny process below).
+   -- ifetch_count rising means xu0's embedded cpu0 is genuinely executing
+   -- instructions (a stuck value means it has trapped/halted, which the
+   -- free-running HEARTBEAT above deliberately cannot tell us).
+   -- xubm_run_count counts each time xubm0 asserts its local-bus request,
+   -- i.e. each time the microcode asks to move data to/from GUEST memory -
+   -- if this never moves while the guest is retrying PDMD, the microcode is
+   -- never even attempting the ring/PCB fetch.
+   signal ifetch_count : std_logic_vector(15 downto 0) := (others => '0');
+   signal xubm_run_count : std_logic_vector(15 downto 0) := (others => '0');
+   signal dbg_ifetch_d : std_logic := '0';
+   signal dbg_xubm_npr_d : std_logic := '0';
+
+   -- free-running heartbeat, incremented every clk (xu0's own local-unibus
+   -- clock) cycle whenever this frontend is selected - completely
+   -- independent of run/state/guest traffic, so a daemon polling HEARTBEAT
+   -- and seeing it change proves xu0's clock/logic domain is alive even
+   -- when the guest has sent nothing and no run is in progress. Deliberately
+   -- kept out of the DMA/run FSM above (own signal, own tiny process) so it
+   -- can never interact with or mask the npr/npg arbitration path.
+   signal heartbeat_ctr : std_logic_vector(31 downto 0) := (others => '0');
 
 -- s_axi_aclk domain - req_pending, req_len, run_done_lvl and the AXI slave
 -- signals below are driven only by the AXI process.
@@ -214,6 +329,33 @@ architecture implementation of xuaxi is
    signal axi_rvalid  : std_logic := '0';
    signal axi_rdata   : std_logic_vector(31 downto 0) := (others => '0');
 
+   -- heartbeat_ctr double-registered into the s_axi_aclk domain. This is a
+   -- multi-bit value crossing clock domains without per-bit gray-coding or
+   -- handshake, which would normally risk sampling a torn/transient value -
+   -- acceptable here specifically because HEARTBEAT is read-only, advisory,
+   -- and only ever used by the daemon to check "did this change since my
+   -- last poll", never for an exact count or as a control input. Any single
+   -- torn sample still reads as "some value near the real one" and the next
+   -- poll (milliseconds later, ctr having advanced by thousands/millions)
+   -- will unambiguously show movement either way.
+   signal heartbeat_sync1 : std_logic_vector(31 downto 0) := (others => '0');
+   signal heartbeat_sync2 : std_logic_vector(31 downto 0) := (others => '0');
+
+   -- state/srdy and the two run counters, double-registered the same way -
+   -- see the comment above heartbeat_sync1 for why this relaxed treatment
+   -- is fine for read-only diagnostics.
+   signal state_code : std_logic_vector(2 downto 0);   -- current DMA FSM state, encoded
+   signal debug1_sync1   : std_logic_vector(3 downto 0) := (others => '0');
+   signal debug1_sync2   : std_logic_vector(3 downto 0) := (others => '0');
+   signal runstats_sync1 : std_logic_vector(31 downto 0) := (others => '0');
+   signal runstats_sync2 : std_logic_vector(31 downto 0) := (others => '0');
+
+   signal debug2_sync1 : std_logic_vector(25 downto 0) := (others => '0');
+   signal debug2_sync2 : std_logic_vector(25 downto 0) := (others => '0');
+
+   signal debug3_sync1 : std_logic_vector(31 downto 0) := (others => '0');
+   signal debug3_sync2 : std_logic_vector(31 downto 0) := (others => '0');
+
 begin
 
    base_addr_match <= '1' when have_xu_esp = 1 and base_addr(17 downto 4) = bus_addr(17 downto 4) else '0';
@@ -230,7 +372,35 @@ begin
 
    irq <= req_pending;
 
-   srdy <= '1' when state = s_idle else '0';
+   -- SRDY is ACTIVE LOW, exactly as in the xubf.vhd this module replaces:
+   -- there it comes straight off the physical ESP32's xubf_srdy pin, is reset
+   -- to '1', and xubf's own DMA engine only proceeds `if npg = '1' and
+   -- srdy = '0'`. The microcode agrees - xubw.mac's main loop does `xubfc`
+   -- (read this status word) then `bmi 30$`, i.e. if bit15 is SET it treats
+   -- the frontend as NOT ready and branches past ALL payload processing,
+   -- including the `20$` block that is the only place the transmit ring is
+   -- ever polled.
+   --
+   -- Getting this backwards self-deadlocks: idle would report "busy", the
+   -- microcode would skip the xubf transaction that is the only thing that
+   -- starts a run, so the engine would never leave s_idle - which is exactly
+   -- the hang this cost us (guest wedged, run_start_count stuck at 0, while
+   -- PCSR commands kept being serviced because 30$ is precisely where the
+   -- microcode was branching to).
+   srdy <= '0' when state = s_idle else '1';
+
+   -- s_tx_wait shares s_tx_req's code: both just mean "fetching a word from
+   -- guest memory", and folding them keeps this a 3-bit field so DEBUG1's
+   -- layout (and the daemon's decode of it) stays unchanged.
+   state_code <= "000" when state = s_idle
+      else "001" when state = s_tx_req
+      else "001" when state = s_tx_wait
+      else "010" when state = s_tx_cap
+      else "011" when state = s_wait_daemon
+      else "100" when state = s_rx_wait_grant
+      else "101" when state = s_rx_req
+      else "110" when state = s_rx_cap
+      else "111";                                       -- s_done
 
    -- ============ host register interface (local unibus, clk domain) ============
    process(clk, reset)
@@ -293,6 +463,8 @@ begin
                nwords <= (others => '0');
                run_req <= '0';
                run_done_s <= "00";
+               run_start_count <= (others => '0');
+               run_done_count <= (others => '0');
             end if;
 
          else
@@ -320,6 +492,7 @@ begin
                         end if;
                         npr <= '1';
                         state <= s_tx_req;
+                        run_start_count <= run_start_count + 1;
                      end if;
 
                   -- ---- phase 1: PDP-11 mem[XF..] -> tx_buf ----
@@ -334,9 +507,24 @@ begin
                            txaddr := xf + ("00000" & widx & '0');
                            bus_master_addr <= "00" & txaddr;
                            bus_master_control_dati <= '1';
-                           state <= s_tx_cap;
+                           state <= s_tx_wait;
                         end if;
                      end if;
+
+                  -- One extra cycle with the address and dati still asserted
+                  -- before latching. Capturing in the cycle immediately after
+                  -- asserting dati (which is what rh11.vhd and the original
+                  -- xubf.vhd both do against MAIN memory) latches one word
+                  -- too early here: measured on hardware, tx_buf(k) came back
+                  -- holding the word for address k-1, so the frame reached the
+                  -- daemon shifted 2 bytes and its 0xa0a0 magic landed at
+                  -- bytes 2-3. xu0's local unibus - RAM behind its own mmu0 -
+                  -- evidently needs the extra cycle that main memory doesn't.
+                  -- (xubf.vhd very likely shares this bug; its DMA has never
+                  -- run on real hardware, have_xu was 0 in every build until
+                  -- this session.)
+                  when s_tx_wait =>
+                     state <= s_tx_cap;
 
                   when s_tx_cap =>
                      bus_master_control_dati <= '0';
@@ -361,6 +549,7 @@ begin
                      if widx = nwords then
                         npr <= '0';
                         state <= s_done;
+                        run_done_count <= run_done_count + 1;
                      else
                         rxaddr := rt + ("00000" & widx & '0');
                         bus_master_addr <= "00" & rxaddr;
@@ -383,6 +572,40 @@ begin
       end if;
    end process;
 
+   -- ============ heartbeat counter (clk domain) ============
+   process(clk, reset)
+   begin
+      if clk = '1' and clk'event then
+         if reset = '1' then
+            heartbeat_ctr <= (others => '0');
+         elsif have_xu_esp = 1 then
+            heartbeat_ctr <= heartbeat_ctr + 1;
+         end if;
+      end if;
+   end process;
+
+   -- ============ xu0-internal activity counters (clk domain) ============
+   process(clk, reset)
+   begin
+      if clk = '1' and clk'event then
+         if reset = '1' then
+            ifetch_count <= (others => '0');
+            xubm_run_count <= (others => '0');
+            dbg_ifetch_d <= '0';
+            dbg_xubm_npr_d <= '0';
+         elsif have_xu_esp = 1 then
+            dbg_ifetch_d <= dbg_ifetch;
+            dbg_xubm_npr_d <= dbg_xubm_npr;
+            if dbg_ifetch = '1' and dbg_ifetch_d = '0' then
+               ifetch_count <= ifetch_count + 1;
+            end if;
+            if dbg_xubm_npr = '1' and dbg_xubm_npr_d = '0' then
+               xubm_run_count <= xubm_run_count + 1;
+            end if;
+         end if;
+      end if;
+   end process;
+
    -- ============ AXI-Lite slave + daemon-request backend (s_axi_aclk) ============
    process(s_axi_aclk)
       variable widx_ax : integer range 0 to buf_words-1;
@@ -400,6 +623,16 @@ begin
             run_req_s <= "00";
             run_done_lvl <= '0';
             req_pending <= '0';
+            heartbeat_sync1 <= (others => '0');
+            heartbeat_sync2 <= (others => '0');
+            debug1_sync1 <= (others => '0');
+            debug1_sync2 <= (others => '0');
+            runstats_sync1 <= (others => '0');
+            runstats_sync2 <= (others => '0');
+            debug2_sync1 <= (others => '0');
+            debug2_sync2 <= (others => '0');
+            debug3_sync1 <= (others => '0');
+            debug3_sync2 <= (others => '0');
          else
             -- ---- AXI-Lite write channel ----
             if axi_awready = '0' and s_axi_awvalid = '1' and s_axi_wvalid = '1' and axi_bvalid = '0' then
@@ -451,6 +684,16 @@ begin
                         axi_rdata(0) <= req_pending;
                      when "001" =>                        -- 0x1004 LEN
                         axi_rdata <= x"00000" & "0" & req_len;
+                     when "011" =>                        -- 0x100C HEARTBEAT
+                        axi_rdata <= heartbeat_sync2;
+                     when "100" =>                        -- 0x1010 DEBUG1: srdy & state(2:0)
+                        axi_rdata <= x"0000000" & debug1_sync2;
+                     when "101" =>                        -- 0x1014 RUNSTATS: done<<16 | start
+                        axi_rdata <= runstats_sync2;
+                     when "110" =>                        -- 0x1018 DEBUG2
+                        axi_rdata <= "000000" & debug2_sync2;
+                     when "111" =>                        -- 0x101C DEBUG3
+                        axi_rdata <= debug3_sync2;
                      when others =>
                         axi_rdata <= (others => '0');
                   end case;
@@ -477,6 +720,19 @@ begin
             elsif run_req_s(1) = '0' then
                run_done_lvl <= '0';
             end if;
+
+            -- ---- heartbeat: double-register into this domain ----
+            heartbeat_sync1 <= heartbeat_ctr;
+            heartbeat_sync2 <= heartbeat_sync1;
+            debug1_sync1 <= srdy & state_code;
+            debug1_sync2 <= debug1_sync1;
+            runstats_sync1 <= run_done_count & run_start_count;
+            runstats_sync2 <= runstats_sync1;
+            debug2_sync1 <= dbg_cpu_npg & dbg_cpu_npr & dbg_xubm_npg & dbg_xubm_npr
+               & dbg_outer_npg & dbg_outer_npr & dbg_pcsr1_state & dbg_pcsr0;
+            debug2_sync2 <= debug2_sync1;
+            debug3_sync1 <= xubm_run_count & ifetch_count;
+            debug3_sync2 <= debug3_sync1;
          end if;
       end if;
    end process;

@@ -5,7 +5,7 @@
 -- controllers (rl11 etc.) that sdspi does: sdcard_addr, the read/write
 -- start/ack/done handshake, and the 256-word (512-byte) rsector/wsector
 -- buffers. Instead of bit-banging a physical SD card, the sector data is
--- served by a Linux daemon (pdp11-diskd) on the PS. This module is an AXI-Lite
+-- served by a Linux daemon (pdp11-hostd) on the PS. This module is an AXI-Lite
 -- slave with an interrupt:
 --   * block read : the controller asserts read_start; this module latches the
 --     block number, raises the interrupt, and waits. The daemon reads the block
@@ -70,7 +70,7 @@ entity sddisk is
       reset : in std_logic;
       clk50mhz : in std_logic;                         -- unused (kept for pin-compat)
 
-      -- AXI-Lite slave (PS / pdp11-diskd side)
+      -- AXI-Lite slave (PS / pdp11-hostd side)
       s_axi_aclk    : in  std_logic;
       s_axi_aresetn : in  std_logic;
       s_axi_awaddr  : in  std_logic_vector(11 downto 0);

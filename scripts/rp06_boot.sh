@@ -1,6 +1,6 @@
 #!/bin/bash
 # rp06_boot.sh - boot from the RP06 image on RH11/DB0 via ODT. RH11/DB0 is
-# now served by pdp11-diskd from a PS image file over its own AXI bridge
+# now served by pdp11-hostd from a PS image file over its own AXI bridge
 # (see rh_disk_s_axi_* in zynq_top.vhd) - this script only pokes RH11's
 # registers over the console, so it works the same regardless of backend.
 #
@@ -18,8 +18,8 @@
 # straight to a read data command works.
 #
 # Prereq: an RP06 image (815 cyl x 19 head x 22 sector, 512B/sector) loaded
-# into RH0/DB0 via pdp11-diskd (dlctl load rh0 <img>, or the -R seed flag -
-# see pdp11-diskd.c), and the PDP-11 sitting at the ODT '@' prompt (needs a
+# into RH0/DB0 via pdp11-hostd (dlctl load rh0 <img>, or the -R seed flag -
+# see pdp11-hostd.c), and the PDP-11 sitting at the ODT '@' prompt (needs a
 # bitstream built with bootrom => boot_odt, see zynq_top.vhd).
 #
 # Usage:  scripts/rp06_boot.sh [PORT]

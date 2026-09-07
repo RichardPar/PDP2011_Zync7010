@@ -12,7 +12,7 @@
 -- bridge (rh_disk_s_axi_* below) on 2026-09-04, mirroring the RL11's
 -- disk_s_axi_* bridge - see [[file-backed-rl-disk]] in memory. The physical
 -- SD pins (sd_cs/mosi/sclk/miso) are now idle/unused (see their port comment
--- below); pdp11-diskd serves both drives from PS image files.
+-- below); pdp11-hostd serves both drives from PS image files.
 --
 -- Refactored 2026-09-04: the NeoPixel front panel and the bring-up
 -- diagnostics GPIO used to be inline processes/functions in this file's own
@@ -114,7 +114,7 @@ entity zynq_top is
       sd_sclk   : out std_logic;
       sd_miso   : in  std_logic;
 
-      -- RL disk AXI-Lite slave (served by pdp11-diskd) + interrupt, to the BD
+      -- RL disk AXI-Lite slave (served by pdp11-hostd) + interrupt, to the BD
       disk_s_axi_aclk    : in  std_logic;
       disk_s_axi_aresetn : in  std_logic;
       disk_s_axi_awaddr  : in  std_logic_vector(11 downto 0);
@@ -136,7 +136,7 @@ entity zynq_top is
       disk_s_axi_rready  : in  std_logic;
       disk_irq           : out std_logic;
 
-      -- RH disk (RP06) AXI-Lite slave (served by pdp11-diskd) + interrupt, to
+      -- RH disk (RP06) AXI-Lite slave (served by pdp11-hostd) + interrupt, to
       -- the BD - same bridge pattern as the RL disk_s_axi_* above
       rh_disk_s_axi_aclk    : in  std_logic;
       rh_disk_s_axi_aresetn : in  std_logic;
@@ -159,7 +159,7 @@ entity zynq_top is
       rh_disk_s_axi_rready  : in  std_logic;
       rh_disk_irq           : out std_logic;
 
-      -- Network (xuaxi "virtual ESP32" backend, served by pdp11-espd) AXI-
+      -- Network (xuaxi "virtual ESP32" backend, served by pdp11-hostd) AXI-
       -- Lite slave + interrupt, to the BD - same bridge pattern as the disk
       -- busses above, active when have_xu_net (below) is 1
       net_s_axi_aclk    : in  std_logic;
@@ -225,13 +225,17 @@ architecture implementation of zynq_top is
 
    -- Master enable for XU networking (the embedded DEUNA microcode engine
    -- in xu.vhd + xuaxi.vhd's AXI-Lite "virtual ESP32" backend, served by
-   -- pdp11-espd on the PS - see docs/xu-networking-plan.md). A single flag
+   -- pdp11-hostd on the PS - see docs/xu-networking-plan.md). A single flag
    -- rather than hardcoding 1 at the port map below, so a build issue
    -- (timing, LUT budget, a regression) can be bisected by flipping this to
    -- 0 and rebuilding - falls back cleanly to no networking (the DEUNA
    -- device disappears from the M9312 boot table) without touching any
-   -- wiring below.
-   constant have_xu_net : integer := 0;  -- TEMP: bisecting a real RH-disk regression, see docs/xu-networking-plan.md
+   -- wiring below. Re-enabled here to retest against the now-consolidated
+   -- AXI expansion bus (see memory [[xu-networking-esp-bridge]] for the
+   -- bisection history that found the fault tracks this flag, not the
+   -- earlier flat 8-master topology - retesting since the bus topology
+   -- has since changed).
+   constant have_xu_net : integer := 1;
 
    signal addr          : std_logic_vector(21 downto 0);
    signal dati          : std_logic_vector(15 downto 0);
@@ -313,7 +317,7 @@ begin
          have_rh         => 1,
          rh_type         => 6,   -- RP06 (815 cyl x 19 head x 22 sector)
 
-         -- RL disk backed by a PS file via pdp11-diskd (AXI-Lite + irq)
+         -- RL disk backed by a PS file via pdp11-hostd (AXI-Lite + irq)
          rl_disk_s_axi_aclk    => disk_s_axi_aclk,
          rl_disk_s_axi_aresetn => disk_s_axi_aresetn,
          rl_disk_s_axi_awaddr  => disk_s_axi_awaddr,
@@ -335,7 +339,7 @@ begin
          rl_disk_s_axi_rready  => disk_s_axi_rready,
          rl_disk_irq           => disk_irq,
 
-         -- RP06 disk backed by a PS file via pdp11-diskd (AXI-Lite + irq)
+         -- RP06 disk backed by a PS file via pdp11-hostd (AXI-Lite + irq)
          rh_disk_s_axi_aclk    => rh_disk_s_axi_aclk,
          rh_disk_s_axi_aresetn => rh_disk_s_axi_aresetn,
          rh_disk_s_axi_awaddr  => rh_disk_s_axi_awaddr,
@@ -358,7 +362,7 @@ begin
          rh_disk_irq           => rh_disk_irq,
 
          -- XU networking: xuaxi's AXI-Lite "virtual ESP32" backend, served
-         -- by pdp11-espd (AXI-Lite + irq) - see have_xu_net above
+         -- by pdp11-hostd (AXI-Lite + irq) - see have_xu_net above
          have_xu     => have_xu_net,
          have_xu_esp => have_xu_net,
          net_s_axi_aclk    => net_s_axi_aclk,

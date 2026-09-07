@@ -122,10 +122,22 @@ guest testing.
   has hit, not resolved differently this time.
 
 **PS side**
-- `petalinux/meta-user/recipes-apps/pdp11-espd/` (new, mirrors
-  `pdp11-diskd`'s Makefile/init-script/`.bb` layout — no REST API or
-  persistent config needed here). `pdp11-espd.c` ports
-  `xuesp/main/app_spitask.c`'s exact wire framing (fetched from the
+- **Update**: the standalone `pdp11-espd` daemon described below was
+  subsequently merged into `pdp11-hostd` (which also absorbed
+  `pdp11-diskd`) once RL/RH/net were consolidated behind one shared AXI-Lite
+  expansion bus - one process/binary/init-service for every PS-facing
+  device now, instead of two. The logic itself (register map, wire
+  framing, MAC bootstrap, tap/bridge setup) carried over unchanged into
+  `serve_net()`/`net_t` in `pdp11-hostd.c`; only the surrounding process
+  structure changed. The rest of this section is kept as originally
+  written (describing the code when it was still its own daemon) since the
+  protocol details are still accurate - just mentally substitute
+  `pdp11-hostd` for `pdp11-espd` throughout.
+- `petalinux/meta-user/recipes-apps/pdp11-espd/` (now removed, merged into
+  `pdp11-hostd/` - see above) originally mirrored `pdp11-diskd`'s Makefile/
+  init-script/`.bb` layout - no REST API or persistent config needed for
+  network. `pdp11-espd.c` ported `xuesp/main/app_spitask.c`'s exact wire
+  framing (fetched from the
   upstream `pdp2011.sytse.net` distribution, extracted to a scratch dir):
   `hdrlen=12`, RX-direction magic `0xaa 0x55` + sequence byte + queued-
   count + big-endian length + 6-byte MAC, TX-direction magic `0xa0 0xa0` +

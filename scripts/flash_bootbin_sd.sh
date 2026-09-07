@@ -142,17 +142,17 @@ if [ "$PARTITION" -eq 1 ]; then
     echo "== Extracting rootfs (this takes a while) =="
     tar -xzpf "$DEPLOY_DIR/rootfs.tar.gz$SUFFIX" -C "$MNT_ROOT" --numeric-owner
 
-    # pdp11-diskd.init silently no-ops (no error) if DL0's image is missing,
+    # pdp11-hostd.init silently no-ops (no error) if DL0's image is missing,
     # so a from-scratch rootfs needs /srv/pdp11 seeded or the daemon never
-    # starts on first boot - mirror what deploy_pdp11_diskd.sh does for an
+    # starts on first boot - mirror what deploy_pdp11_hostd.sh does for an
     # already-running board.
     DISKS_DIR="$SCRIPT_DIR/../disks"
     mkdir -p "$MNT_ROOT/srv/pdp11"
     if [ -f "$DISKS_DIR/dl0.img" ]; then
-        echo "== Seeding /srv/pdp11/dl0.img (DL0, required for diskd to start) =="
+        echo "== Seeding /srv/pdp11/dl0.img (DL0, required for hostd to start) =="
         cp -f "$DISKS_DIR/dl0.img" "$MNT_ROOT/srv/pdp11/dl0.img"
     else
-        echo "WARNING: $DISKS_DIR/dl0.img not found - pdp11-diskd will not start" \
+        echo "WARNING: $DISKS_DIR/dl0.img not found - pdp11-hostd will not start" \
              "on first boot until you put a DL0 image at /srv/pdp11/dl0.img." >&2
     fi
     if [ -f "$DISKS_DIR/dl1.img" ]; then

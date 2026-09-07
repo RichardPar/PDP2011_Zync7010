@@ -7,7 +7,7 @@
 #   2. PetaLinux 2023.2 (in an Ubuntu-22.04 Docker container, see docker/)
 #      -> deploy/BOOT.BIN, image.ub, boot.scr, rootfs.tar.gz
 #      This bakes in the reserved-memory carve-out, the extra KL11 consoles
-#      (ttyUL*), and the rootfs apps: pdp11-diskd (RL disk server), tu58fs
+#      (ttyUL*), and the rootfs apps: pdp11-hostd (disk + network server), tu58fs
 #      (TU58 emulator), picocom, pdp11-scripts.
 #
 # Prerequisites (see README "Building"):

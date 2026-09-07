@@ -61,7 +61,7 @@ entity rh11 is
 
       -- AXI-Lite disk backend (sddisk.vhd) + interrupt, routed out to the PS -
       -- same bridge pattern as rl11.vhd's disk_s_axi_*, so RP06 is served from
-      -- a PS image file by pdp11-diskd instead of the physical SD/SPI card.
+      -- a PS image file by pdp11-hostd instead of the physical SD/SPI card.
       disk_s_axi_aclk    : in  std_logic;
       disk_s_axi_aresetn : in  std_logic;
       disk_s_axi_awaddr  : in  std_logic_vector(11 downto 0);

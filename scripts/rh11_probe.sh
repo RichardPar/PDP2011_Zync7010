@@ -109,5 +109,5 @@ for entry in "${PROBES[@]}"; do
 done
 
 echo "All probes responded. If rp06_boot.sh still hangs, the problem is specific"
-echo "to the read-data command path (GO bit / the sddisk AXI bridge + pdp11-diskd),"
+echo "to the read-data command path (GO bit / the sddisk AXI bridge + pdp11-hostd),"
 echo "not basic register access."

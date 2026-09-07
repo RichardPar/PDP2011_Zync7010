@@ -1,5 +1,5 @@
 #!/bin/bash
-# dlctl.sh - drive the board's pdp11-diskd REST API from the dev host, and push
+# dlctl.sh - drive the board's pdp11-hostd REST API from the dev host, and push
 # images over to it. Mirror of the on-board `dlctl`, plus upload helpers.
 # Covers both busses: RL11 (DL0..DL3) and RH11/RP06 (DB0, one drive only).
 #

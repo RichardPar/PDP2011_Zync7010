@@ -83,7 +83,7 @@ connect_bd_net [get_bd_pins proc_sys_reset0/peripheral_aresetn] [get_bd_pins axi
 # IRQ (it has no polled mode - a driverless first attempt failed with "IRQ index
 # 0 not found"). Linux sees them as /dev/ttyUL* (raw, no getty).
 # In0..In2 = uartlites, In3 = RL disk backend, In4 = RH (RP06) disk backend,
-# In5 = network (xuaxi/pdp11-espd) backend
+# In5 = network (xuaxi/pdp11-hostd) backend
 set uart_irq_concat [create_bd_cell -type ip -vlnv xilinx.com:ip:xlconcat uart_irq_concat]
 set_property -dict [list CONFIG.NUM_PORTS {6}] [get_bd_cells uart_irq_concat]
 connect_bd_net [get_bd_pins uart_irq_concat/dout] [get_bd_pins processing_system7_0/IRQ_F2P]
@@ -127,7 +127,7 @@ connect_bd_net [get_bd_pins proc_sys_reset0/peripheral_aresetn] [get_bd_pins axi
 
 set axi_interconn_expansion [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_interconnect axi_interconn_expansion]
 # M00 = RL disk backend, M01 = RH (RP06) disk backend, M02 = network
-# (xuaxi/pdp11-espd) backend, M03-M05 = spare for future PS-facing devices
+# (xuaxi/pdp11-hostd) backend, M03-M05 = spare for future PS-facing devices
 set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {6}] [get_bd_cells axi_interconn_expansion]
 
 connect_bd_intf_net [get_bd_intf_pins axi_interconn_gp0/M05_AXI] [get_bd_intf_pins axi_interconn_expansion/S00_AXI]
@@ -211,7 +211,7 @@ connect_bd_net [get_bd_pins zynq_top_0/rh_disk_irq] [get_bd_pins uart_irq_concat
 
 # --- network (xuaxi) backend: axi_interconn_expansion/M02 -> zynq_top_0's
 # inferred net_s_axi AXI-Lite slave; same clock/reset; irq -> concat In5.
-# Served by pdp11-espd on the PS - see docs/xu-networking-plan.md. ---
+# Served by pdp11-hostd on the PS - see docs/xu-networking-plan.md. ---
 connect_bd_intf_net [get_bd_intf_pins axi_interconn_expansion/M02_AXI] [get_bd_intf_pins zynq_top_0/net_s_axi]
 connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0]     [get_bd_pins zynq_top_0/net_s_axi_aclk]
 connect_bd_net [get_bd_pins proc_sys_reset0/peripheral_aresetn] [get_bd_pins zynq_top_0/net_s_axi_aresetn]
@@ -259,20 +259,20 @@ for {set i 1} {$i <= 3} {incr i} {
       [get_bd_addr_segs axi_uartlite_$i/S_AXI/Reg] -offset $off -range 64K -force
 }
 
-# RL disk backend AXI-Lite slave at 0x43000000 (pdp11-diskd finds it via the
+# RL disk backend AXI-Lite slave at 0x43000000 (pdp11-hostd finds it via the
 # PetaLinux-generated UIO node, so the exact address is not load-bearing)
 set disk_seg [get_bd_addr_segs -of_objects [get_bd_intf_pins zynq_top_0/disk_s_axi]]
 assign_bd_address -target_address_space [get_bd_addr_spaces processing_system7_0/Data] \
    $disk_seg -offset 0x43000000 -range 64K -force
 
 # RH (RP06) disk backend AXI-Lite slave at 0x43010000 - same rationale as the
-# RL disk backend above, pdp11-diskd finds it by its UIO map0 address
+# RL disk backend above, pdp11-hostd finds it by its UIO map0 address
 set rh_disk_seg [get_bd_addr_segs -of_objects [get_bd_intf_pins zynq_top_0/rh_disk_s_axi]]
 assign_bd_address -target_address_space [get_bd_addr_spaces processing_system7_0/Data] \
    $rh_disk_seg -offset 0x43010000 -range 64K -force
 
 # network (xuaxi) backend AXI-Lite slave at 0x43020000 - next free 64K slot
-# after the disk backends above; pdp11-espd finds it by its UIO map0 address
+# after the disk backends above; pdp11-hostd finds it by its UIO map0 address
 set net_seg [get_bd_addr_segs -of_objects [get_bd_intf_pins zynq_top_0/net_s_axi]]
 assign_bd_address -target_address_space [get_bd_addr_spaces processing_system7_0/Data] \
    $net_seg -offset 0x43020000 -range 64K -force
