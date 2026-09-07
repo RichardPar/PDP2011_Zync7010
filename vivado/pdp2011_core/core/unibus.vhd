@@ -139,6 +139,30 @@ entity unibus is
       have_xu_enc : in integer range 0 to 1 := 0;                    -- include frontend for enc424j600
       have_xu_esp : in integer range 0 to 1 := 0;                    -- include frontend for esp32
 
+      -- AXI-Lite "virtual ESP32" backend (xuaxi.vhd via xu.vhd), active
+      -- when have_xu_esp=1 - pdp11-espd on the Zynq PS instead of a
+      -- physical ESP32 over SPI
+      net_s_axi_aclk    : in  std_logic := '0';
+      net_s_axi_aresetn : in  std_logic := '1';
+      net_s_axi_awaddr  : in  std_logic_vector(15 downto 0) := (others => '0');
+      net_s_axi_awvalid : in  std_logic := '0';
+      net_s_axi_awready : out std_logic;
+      net_s_axi_wdata   : in  std_logic_vector(31 downto 0) := (others => '0');
+      net_s_axi_wstrb   : in  std_logic_vector(3 downto 0) := (others => '0');
+      net_s_axi_wvalid  : in  std_logic := '0';
+      net_s_axi_wready  : out std_logic;
+      net_s_axi_bresp   : out std_logic_vector(1 downto 0);
+      net_s_axi_bvalid  : out std_logic;
+      net_s_axi_bready  : in  std_logic := '0';
+      net_s_axi_araddr  : in  std_logic_vector(15 downto 0) := (others => '0');
+      net_s_axi_arvalid : in  std_logic := '0';
+      net_s_axi_arready : out std_logic;
+      net_s_axi_rdata   : out std_logic_vector(31 downto 0);
+      net_s_axi_rresp   : out std_logic_vector(1 downto 0);
+      net_s_axi_rvalid  : out std_logic;
+      net_s_axi_rready  : in  std_logic := '0';
+      net_irq           : out std_logic;
+
 -- kl11, console ports
       have_kl11 : in integer range 0 to 4 := 1;                      -- conditional compilation - number of kl11 controllers to include. Should normally be at least 1
 
@@ -602,6 +626,27 @@ component xu is
       xu_sclk : out std_logic;
       xu_miso : in std_logic;
       xu_srdy : in std_logic;
+
+      net_s_axi_aclk    : in  std_logic := '0';
+      net_s_axi_aresetn : in  std_logic := '1';
+      net_s_axi_awaddr  : in  std_logic_vector(15 downto 0) := (others => '0');
+      net_s_axi_awvalid : in  std_logic := '0';
+      net_s_axi_awready : out std_logic;
+      net_s_axi_wdata   : in  std_logic_vector(31 downto 0) := (others => '0');
+      net_s_axi_wstrb   : in  std_logic_vector(3 downto 0) := (others => '0');
+      net_s_axi_wvalid  : in  std_logic := '0';
+      net_s_axi_wready  : out std_logic;
+      net_s_axi_bresp   : out std_logic_vector(1 downto 0);
+      net_s_axi_bvalid  : out std_logic;
+      net_s_axi_bready  : in  std_logic := '0';
+      net_s_axi_araddr  : in  std_logic_vector(15 downto 0) := (others => '0');
+      net_s_axi_arvalid : in  std_logic := '0';
+      net_s_axi_arready : out std_logic;
+      net_s_axi_rdata   : out std_logic_vector(31 downto 0);
+      net_s_axi_rresp   : out std_logic_vector(1 downto 0);
+      net_s_axi_rvalid  : out std_logic;
+      net_s_axi_rready  : in  std_logic := '0';
+      net_irq           : out std_logic;
 
 -- flags
       have_xu : in integer range 0 to 1 := 0;
@@ -1956,6 +2001,27 @@ begin
       xu_sclk => xu_sclk,
       xu_miso => xu_miso,
       xu_srdy => xu_srdy,
+
+      net_s_axi_aclk    => net_s_axi_aclk,
+      net_s_axi_aresetn => net_s_axi_aresetn,
+      net_s_axi_awaddr  => net_s_axi_awaddr,
+      net_s_axi_awvalid => net_s_axi_awvalid,
+      net_s_axi_awready => net_s_axi_awready,
+      net_s_axi_wdata   => net_s_axi_wdata,
+      net_s_axi_wstrb   => net_s_axi_wstrb,
+      net_s_axi_wvalid  => net_s_axi_wvalid,
+      net_s_axi_wready  => net_s_axi_wready,
+      net_s_axi_bresp   => net_s_axi_bresp,
+      net_s_axi_bvalid  => net_s_axi_bvalid,
+      net_s_axi_bready  => net_s_axi_bready,
+      net_s_axi_araddr  => net_s_axi_araddr,
+      net_s_axi_arvalid => net_s_axi_arvalid,
+      net_s_axi_arready => net_s_axi_arready,
+      net_s_axi_rdata   => net_s_axi_rdata,
+      net_s_axi_rresp   => net_s_axi_rresp,
+      net_s_axi_rvalid  => net_s_axi_rvalid,
+      net_s_axi_rready  => net_s_axi_rready,
+      net_irq           => net_irq,
 
 -- flags
       have_xu => have_xu,

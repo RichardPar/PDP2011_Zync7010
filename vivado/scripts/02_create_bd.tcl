@@ -33,9 +33,12 @@ connect_bd_net [get_bd_pins processing_system7_0/FCLK_RESET0_N] [get_bd_pins pro
 # zynq_top_0's aresetn low momentarily without touching S_AXI_HP0/the
 # protocol converter/the rest of the fabric. ---
 set axi_interconn_gp0 [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_interconnect axi_interconn_gp0]
-# M00=reset gpio, M01=dbg gpio, M02/M03/M04 = uartlites, M05 = RL disk
-# backend, M06 = RH (RP06) disk backend
-set_property -dict [list CONFIG.NUM_MI {7}] [get_bd_cells axi_interconn_gp0]
+# M00=reset gpio, M01=dbg gpio, M02/M03/M04 = uartlites, M05 = the
+# "expansion" sub-interconnect below (RL/RH disk backends + network today,
+# more devices later without ever touching NUM_MI or uart_irq_concat here
+# again - see docs, this file's own header, and axi_interconn_expansion's
+# comment below)
+set_property -dict [list CONFIG.NUM_MI {6}] [get_bd_cells axi_interconn_gp0]
 
 set axi_gpio_reset [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_gpio axi_gpio_reset]
 set_property -dict [list \
@@ -79,9 +82,10 @@ connect_bd_net [get_bd_pins proc_sys_reset0/peripheral_aresetn] [get_bd_pins axi
 # IRQ_F2P (through the concat below): the Xilinx 6.1 uartlite driver REQUIRES an
 # IRQ (it has no polled mode - a driverless first attempt failed with "IRQ index
 # 0 not found"). Linux sees them as /dev/ttyUL* (raw, no getty).
-# In0..In2 = uartlites, In3 = RL disk backend, In4 = RH (RP06) disk backend
+# In0..In2 = uartlites, In3 = RL disk backend, In4 = RH (RP06) disk backend,
+# In5 = network (xuaxi/pdp11-espd) backend
 set uart_irq_concat [create_bd_cell -type ip -vlnv xilinx.com:ip:xlconcat uart_irq_concat]
-set_property -dict [list CONFIG.NUM_PORTS {5}] [get_bd_cells uart_irq_concat]
+set_property -dict [list CONFIG.NUM_PORTS {6}] [get_bd_cells uart_irq_concat]
 connect_bd_net [get_bd_pins uart_irq_concat/dout] [get_bd_pins processing_system7_0/IRQ_F2P]
 
 set ser_bauds {19200 9600 9600}
@@ -108,14 +112,39 @@ for {set i 1} {$i <= 3} {incr i} {
    # zynq_top_0 cell is created)
 }
 
-# --- RL disk backend AXI-Lite slave (M05) - clocks/reset here, the AXI
-# interface + irq are wired to zynq_top_0 below (after that cell exists) ---
+# --- expansion sub-interconnect (M05 on the outer axi_interconn_gp0): one
+# nested axi_interconnect instance carrying every PS-facing device bridge
+# that isn't the reset/dbg GPIOs or the extra-console uartlites above - RL
+# disk, RH (RP06) disk, and network today. Reuses the exact same proven IP
+# as axi_interconn_gp0 itself rather than any hand-written AXI-Lite address
+# router, and means the OUTER interconnect's NUM_MI/uart_irq_concat sizing
+# never has to change again for a future PS-facing device: just bump this
+# inner instance's own NUM_MI and add one more M0x here. Addresses/UIO/
+# interrupts for RL/RH/net are completely unaffected - see the connections
+# below, unchanged from before this was nested. ---
 connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0]     [get_bd_pins axi_interconn_gp0/M05_ACLK]
 connect_bd_net [get_bd_pins proc_sys_reset0/peripheral_aresetn] [get_bd_pins axi_interconn_gp0/M05_ARESETN]
 
-# --- RH (RP06) disk backend AXI-Lite slave (M06) - same pattern as M05 ---
-connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0]     [get_bd_pins axi_interconn_gp0/M06_ACLK]
-connect_bd_net [get_bd_pins proc_sys_reset0/peripheral_aresetn] [get_bd_pins axi_interconn_gp0/M06_ARESETN]
+set axi_interconn_expansion [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_interconnect axi_interconn_expansion]
+# M00 = RL disk backend, M01 = RH (RP06) disk backend, M02 = network
+# (xuaxi/pdp11-espd) backend, M03-M05 = spare for future PS-facing devices
+set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {6}] [get_bd_cells axi_interconn_expansion]
+
+connect_bd_intf_net [get_bd_intf_pins axi_interconn_gp0/M05_AXI] [get_bd_intf_pins axi_interconn_expansion/S00_AXI]
+connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0]     [get_bd_pins axi_interconn_expansion/ACLK]
+connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0]     [get_bd_pins axi_interconn_expansion/S00_ACLK]
+connect_bd_net [get_bd_pins proc_sys_reset0/peripheral_aresetn] [get_bd_pins axi_interconn_expansion/ARESETN]
+connect_bd_net [get_bd_pins proc_sys_reset0/peripheral_aresetn] [get_bd_pins axi_interconn_expansion/S00_ARESETN]
+
+foreach mi {M00 M01 M02 M03 M04 M05} {
+   connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0]     [get_bd_pins axi_interconn_expansion/${mi}_ACLK]
+   connect_bd_net [get_bd_pins proc_sys_reset0/peripheral_aresetn] [get_bd_pins axi_interconn_expansion/${mi}_ARESETN]
+}
+# M03-M05's own AXI data pins stay unconnected (no address assigned) until a
+# future device claims one - the interconnect IP still requires every
+# enabled master port's clock/reset wired regardless, or validate_bd_design
+# errors on "clock pins not connected to a valid clock source" even for a
+# port nothing is using yet.
 
 set reset_inv [create_bd_cell -type ip -vlnv xilinx.com:ip:util_vector_logic reset_inv]
 set_property -dict [list CONFIG.C_SIZE {1} CONFIG.C_OPERATION {not}] [get_bd_cells reset_inv]
@@ -160,22 +189,33 @@ for {set i 1} {$i <= 3} {incr i} {
    connect_bd_net [get_bd_pins zynq_top_0/ser${i}_tx] [get_bd_pins axi_uartlite_$i/rx]
 }
 
-# --- RL disk backend: interconnect M05 -> zynq_top_0's inferred disk_s_axi
-# AXI-Lite slave; FCLK0/peripheral_aresetn as its clock/reset; irq -> concat In3.
-# The disk_s_axi_* pins on the zynq_top module reference are grouped by Vivado
-# into the 'disk_s_axi' interface pin (same as m_axi is). ---
-connect_bd_intf_net [get_bd_intf_pins axi_interconn_gp0/M05_AXI] [get_bd_intf_pins zynq_top_0/disk_s_axi]
+# --- RL disk backend: axi_interconn_expansion/M00 -> zynq_top_0's inferred
+# disk_s_axi AXI-Lite slave; FCLK0/peripheral_aresetn as its clock/reset;
+# irq -> concat In3 (irq wiring is unaffected by the expansion bus - it
+# never goes through either axi_interconnect). The disk_s_axi_* pins on the
+# zynq_top module reference are grouped by Vivado into the 'disk_s_axi'
+# interface pin (same as m_axi is). ---
+connect_bd_intf_net [get_bd_intf_pins axi_interconn_expansion/M00_AXI] [get_bd_intf_pins zynq_top_0/disk_s_axi]
 connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0]     [get_bd_pins zynq_top_0/disk_s_axi_aclk]
 connect_bd_net [get_bd_pins proc_sys_reset0/peripheral_aresetn] [get_bd_pins zynq_top_0/disk_s_axi_aresetn]
 connect_bd_net [get_bd_pins zynq_top_0/disk_irq] [get_bd_pins uart_irq_concat/In3]
 
-# --- RH (RP06) disk backend: interconnect M06 -> zynq_top_0's inferred
-# rh_disk_s_axi AXI-Lite slave; same clock/reset; irq -> concat In4. Same
-# bridge as the RL disk backend just above, one AXI-Lite slave per drive. ---
-connect_bd_intf_net [get_bd_intf_pins axi_interconn_gp0/M06_AXI] [get_bd_intf_pins zynq_top_0/rh_disk_s_axi]
+# --- RH (RP06) disk backend: axi_interconn_expansion/M01 -> zynq_top_0's
+# inferred rh_disk_s_axi AXI-Lite slave; same clock/reset; irq -> concat
+# In4. Same bridge as the RL disk backend just above, one AXI-Lite slave
+# per drive. ---
+connect_bd_intf_net [get_bd_intf_pins axi_interconn_expansion/M01_AXI] [get_bd_intf_pins zynq_top_0/rh_disk_s_axi]
 connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0]     [get_bd_pins zynq_top_0/rh_disk_s_axi_aclk]
 connect_bd_net [get_bd_pins proc_sys_reset0/peripheral_aresetn] [get_bd_pins zynq_top_0/rh_disk_s_axi_aresetn]
 connect_bd_net [get_bd_pins zynq_top_0/rh_disk_irq] [get_bd_pins uart_irq_concat/In4]
+
+# --- network (xuaxi) backend: axi_interconn_expansion/M02 -> zynq_top_0's
+# inferred net_s_axi AXI-Lite slave; same clock/reset; irq -> concat In5.
+# Served by pdp11-espd on the PS - see docs/xu-networking-plan.md. ---
+connect_bd_intf_net [get_bd_intf_pins axi_interconn_expansion/M02_AXI] [get_bd_intf_pins zynq_top_0/net_s_axi]
+connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0]     [get_bd_pins zynq_top_0/net_s_axi_aclk]
+connect_bd_net [get_bd_pins proc_sys_reset0/peripheral_aresetn] [get_bd_pins zynq_top_0/net_s_axi_aresetn]
+connect_bd_net [get_bd_pins zynq_top_0/net_irq] [get_bd_pins uart_irq_concat/In5]
 
 # --- AXI4 -> AXI3 protocol converter into S_AXI_HP0 (Zynq-7000 HP ports are
 # AXI3-only) ---
@@ -230,6 +270,12 @@ assign_bd_address -target_address_space [get_bd_addr_spaces processing_system7_0
 set rh_disk_seg [get_bd_addr_segs -of_objects [get_bd_intf_pins zynq_top_0/rh_disk_s_axi]]
 assign_bd_address -target_address_space [get_bd_addr_spaces processing_system7_0/Data] \
    $rh_disk_seg -offset 0x43010000 -range 64K -force
+
+# network (xuaxi) backend AXI-Lite slave at 0x43020000 - next free 64K slot
+# after the disk backends above; pdp11-espd finds it by its UIO map0 address
+set net_seg [get_bd_addr_segs -of_objects [get_bd_intf_pins zynq_top_0/net_s_axi]]
+assign_bd_address -target_address_space [get_bd_addr_spaces processing_system7_0/Data] \
+   $net_seg -offset 0x43020000 -range 64K -force
 
 validate_bd_design
 save_bd_design

@@ -78,3 +78,33 @@
 	};
 };
 
+/*
+ * Network (xuaxi "virtual ESP32" backend, AXI-Lite slave at 0x43020000) UIO
+ * node for pdp11-espd - same node-splitting requirement as rh_disk_uio
+ * above (the device-tree generator does not make a second node per extra
+ * zynq_top_0 AXI-Lite slave, so this is a separate node, same &zynq_top_0
+ * amba_pl path, matched by reg address).
+ *
+ * The interrupts cell below is an UNVERIFIED PLACEHOLDER, computed the same
+ * way rh_disk_uio's 0x21 was derived (concat port index -> IRQ_F2P[index],
+ * Zynq-7000 IRQ_F2P0 = GIC SPI 61, DT cell = SPI-32): this is In5 (the 6th
+ * xlconcat port, see 02_create_bd.tcl), so 61+5-32 = 0x22. MUST be checked
+ * against a live `dtc` dump after the next bitstream rebuild + boot (same
+ * gotcha every AXI bridge in this project has hit - see rh_disk_uio's own
+ * comment above for the refresh procedure):
+ *   dtc -I fs -O dts /sys/firmware/devicetree/base -o /tmp/live.dts
+ *   grep -A10 'zynq_top@43000000' /tmp/live.dts
+ * and take the 3rd 3-cell group of `interrupts` (after disk_irq, rh_disk_irq).
+ */
+/ {
+	amba_pl {
+		net_uio: net_uio@43020000 {
+			compatible = "generic-uio";
+			reg = <0x43020000 0x10000>;
+			interrupt-parent = <&intc>;
+			interrupts = <0 0x22 4>;
+			linux,uio-name = "pdp11net";
+		};
+	};
+};
+

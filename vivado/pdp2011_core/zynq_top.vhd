@@ -159,6 +159,30 @@ entity zynq_top is
       rh_disk_s_axi_rready  : in  std_logic;
       rh_disk_irq           : out std_logic;
 
+      -- Network (xuaxi "virtual ESP32" backend, served by pdp11-espd) AXI-
+      -- Lite slave + interrupt, to the BD - same bridge pattern as the disk
+      -- busses above, active when have_xu_net (below) is 1
+      net_s_axi_aclk    : in  std_logic;
+      net_s_axi_aresetn : in  std_logic;
+      net_s_axi_awaddr  : in  std_logic_vector(15 downto 0);
+      net_s_axi_awvalid : in  std_logic;
+      net_s_axi_awready : out std_logic;
+      net_s_axi_wdata   : in  std_logic_vector(31 downto 0);
+      net_s_axi_wstrb   : in  std_logic_vector(3 downto 0);
+      net_s_axi_wvalid  : in  std_logic;
+      net_s_axi_wready  : out std_logic;
+      net_s_axi_bresp   : out std_logic_vector(1 downto 0);
+      net_s_axi_bvalid  : out std_logic;
+      net_s_axi_bready  : in  std_logic;
+      net_s_axi_araddr  : in  std_logic_vector(15 downto 0);
+      net_s_axi_arvalid : in  std_logic;
+      net_s_axi_arready : out std_logic;
+      net_s_axi_rdata   : out std_logic_vector(31 downto 0);
+      net_s_axi_rresp   : out std_logic_vector(1 downto 0);
+      net_s_axi_rvalid  : out std_logic;
+      net_s_axi_rready  : in  std_logic;
+      net_irq           : out std_logic;
+
       -- AXI4 master to PS DDR3 (through an AXI4->AXI3 protocol converter to
       -- S_AXI_HP0 at the BD level)
       m_axi_awaddr  : out std_logic_vector(31 downto 0);
@@ -198,6 +222,16 @@ entity zynq_top is
 end zynq_top;
 
 architecture implementation of zynq_top is
+
+   -- Master enable for XU networking (the embedded DEUNA microcode engine
+   -- in xu.vhd + xuaxi.vhd's AXI-Lite "virtual ESP32" backend, served by
+   -- pdp11-espd on the PS - see docs/xu-networking-plan.md). A single flag
+   -- rather than hardcoding 1 at the port map below, so a build issue
+   -- (timing, LUT budget, a regression) can be bisected by flipping this to
+   -- 0 and rebuilding - falls back cleanly to no networking (the DEUNA
+   -- device disappears from the M9312 boot table) without touching any
+   -- wiring below.
+   constant have_xu_net : integer := 0;  -- TEMP: bisecting a real RH-disk regression, see docs/xu-networking-plan.md
 
    signal addr          : std_logic_vector(21 downto 0);
    signal dati          : std_logic_vector(15 downto 0);
@@ -322,6 +356,31 @@ begin
          rh_disk_s_axi_rvalid  => rh_disk_s_axi_rvalid,
          rh_disk_s_axi_rready  => rh_disk_s_axi_rready,
          rh_disk_irq           => rh_disk_irq,
+
+         -- XU networking: xuaxi's AXI-Lite "virtual ESP32" backend, served
+         -- by pdp11-espd (AXI-Lite + irq) - see have_xu_net above
+         have_xu     => have_xu_net,
+         have_xu_esp => have_xu_net,
+         net_s_axi_aclk    => net_s_axi_aclk,
+         net_s_axi_aresetn => net_s_axi_aresetn,
+         net_s_axi_awaddr  => net_s_axi_awaddr,
+         net_s_axi_awvalid => net_s_axi_awvalid,
+         net_s_axi_awready => net_s_axi_awready,
+         net_s_axi_wdata   => net_s_axi_wdata,
+         net_s_axi_wstrb   => net_s_axi_wstrb,
+         net_s_axi_wvalid  => net_s_axi_wvalid,
+         net_s_axi_wready  => net_s_axi_wready,
+         net_s_axi_bresp   => net_s_axi_bresp,
+         net_s_axi_bvalid  => net_s_axi_bvalid,
+         net_s_axi_bready  => net_s_axi_bready,
+         net_s_axi_araddr  => net_s_axi_araddr,
+         net_s_axi_arvalid => net_s_axi_arvalid,
+         net_s_axi_arready => net_s_axi_arready,
+         net_s_axi_rdata   => net_s_axi_rdata,
+         net_s_axi_rresp   => net_s_axi_rresp,
+         net_s_axi_rvalid  => net_s_axi_rvalid,
+         net_s_axi_rready  => net_s_axi_rready,
+         net_irq           => net_irq,
 
          bootrom => boot_pdp2011,  -- auto-boot: tries rk, rl, rp in that order.
                                 -- Was a known bug up to 2026-08-14: if RL0 wasn't

@@ -56,6 +56,29 @@ entity xu is
       xu_miso : in std_logic;
       xu_srdy : in std_logic;
 
+-- AXI-Lite "virtual ESP32" backend (xuaxi.vhd) - active when have_xu_esp=1,
+-- talks to pdp11-espd on the Zynq PS instead of a physical ESP32 over SPI
+      net_s_axi_aclk    : in  std_logic := '0';
+      net_s_axi_aresetn : in  std_logic := '1';
+      net_s_axi_awaddr  : in  std_logic_vector(15 downto 0) := (others => '0');
+      net_s_axi_awvalid : in  std_logic := '0';
+      net_s_axi_awready : out std_logic;
+      net_s_axi_wdata   : in  std_logic_vector(31 downto 0) := (others => '0');
+      net_s_axi_wstrb   : in  std_logic_vector(3 downto 0) := (others => '0');
+      net_s_axi_wvalid  : in  std_logic := '0';
+      net_s_axi_wready  : out std_logic;
+      net_s_axi_bresp   : out std_logic_vector(1 downto 0);
+      net_s_axi_bvalid  : out std_logic;
+      net_s_axi_bready  : in  std_logic := '0';
+      net_s_axi_araddr  : in  std_logic_vector(15 downto 0) := (others => '0');
+      net_s_axi_arvalid : in  std_logic := '0';
+      net_s_axi_arready : out std_logic;
+      net_s_axi_rdata   : out std_logic_vector(31 downto 0);
+      net_s_axi_rresp   : out std_logic_vector(1 downto 0);
+      net_s_axi_rvalid  : out std_logic;
+      net_s_axi_rready  : in  std_logic := '0';
+      net_irq           : out std_logic;
+
 -- flags
       have_xu : in integer range 0 to 1 := 0;
       have_xu_debug : in integer range 0 to 1 := 1;
@@ -213,7 +236,12 @@ component xubl is
    );
 end component;
 
-component xubf is
+-- xuaxi: AXI-Lite "virtual ESP32" backend, a drop-in replacement for the
+-- upstream xubf.vhd (physical bit-banged SPI to a real ESP32 - no longer
+-- instantiated here, see docs/xu-networking-plan.md). Same XF/RT/RL/SRDY
+-- register contract on the local unibus, but the SPI pins are replaced by
+-- an AXI-Lite slave + irq to a Linux daemon (pdp11-espd) on the Zynq PS.
+component xuaxi is
    port(
       base_addr : in std_logic_vector(17 downto 0);
 
@@ -235,16 +263,31 @@ component xubf is
       bus_master_control_dato : out std_logic;
       bus_master_nxm : in std_logic;
 
-      xubf_cs : out std_logic;
-      xubf_mosi : out std_logic;
-      xubf_sclk : out std_logic;
-      xubf_miso : in std_logic;
-      xubf_srdy : in std_logic;
-
       have_xu_esp : in integer range 0 to 1 := 0;
 
+      s_axi_aclk    : in  std_logic;
+      s_axi_aresetn : in  std_logic;
+      s_axi_awaddr  : in  std_logic_vector(15 downto 0);
+      s_axi_awvalid : in  std_logic;
+      s_axi_awready : out std_logic;
+      s_axi_wdata   : in  std_logic_vector(31 downto 0);
+      s_axi_wstrb   : in  std_logic_vector(3 downto 0);
+      s_axi_wvalid  : in  std_logic;
+      s_axi_wready  : out std_logic;
+      s_axi_bresp   : out std_logic_vector(1 downto 0);
+      s_axi_bvalid  : out std_logic;
+      s_axi_bready  : in  std_logic;
+      s_axi_araddr  : in  std_logic_vector(15 downto 0);
+      s_axi_arvalid : in  std_logic;
+      s_axi_arready : out std_logic;
+      s_axi_rdata   : out std_logic_vector(31 downto 0);
+      s_axi_rresp   : out std_logic_vector(1 downto 0);
+      s_axi_rvalid  : out std_logic;
+      s_axi_rready  : in  std_logic;
+
+      irq : out std_logic;
+
       reset : in std_logic;
-      xubfclk : in std_logic;
       clk : in std_logic
    );
 end component;
@@ -399,19 +442,18 @@ signal localunibus_busmaster_xubl_dato : std_logic_vector(15 downto 0);
 signal localunibus_busmaster_xubl_control_dati : std_logic;
 signal localunibus_busmaster_xubl_control_dato : std_logic;
 
-signal xubf_cs : std_logic;
-signal xubf_sclk : std_logic;
-signal xubf_miso : std_logic;
-signal xubf_mosi : std_logic;
-signal xubf_srdy : std_logic;
-signal xubf_addr_match : std_logic;
-signal xubf_dati : std_logic_vector(15 downto 0);
-signal xubf_npr : std_logic;
+-- xuaxi (AXI-Lite "virtual ESP32" backend) replaces xubf's physical SPI
+-- pins (xubf_cs/mosi/sclk/miso/srdy - no longer needed) but keeps the same
+-- local-unibus addr_match/dati/npr + bus-master shape every other frontend
+-- here uses.
+signal xuaxi_addr_match : std_logic;
+signal xuaxi_dati : std_logic_vector(15 downto 0);
+signal xuaxi_npr : std_logic;
 
-signal localunibus_busmaster_xubf_addr : std_logic_vector(17 downto 0);
-signal localunibus_busmaster_xubf_dato : std_logic_vector(15 downto 0);
-signal localunibus_busmaster_xubf_control_dati : std_logic;
-signal localunibus_busmaster_xubf_control_dato : std_logic;
+signal localunibus_busmaster_xuaxi_addr : std_logic_vector(17 downto 0);
+signal localunibus_busmaster_xuaxi_dato : std_logic_vector(15 downto 0);
+signal localunibus_busmaster_xuaxi_control_dati : std_logic;
+signal localunibus_busmaster_xuaxi_control_dato : std_logic;
 
 signal xubm_addr_match : std_logic;
 signal xubm_dati : std_logic_vector(15 downto 0);
@@ -721,49 +763,61 @@ begin
    xubl_miso <= xu_miso;
 
 
-   xubf0: xubf port map(
+   xuaxi0: xuaxi port map(
       base_addr => o"777000",
 
-      npr => xubf_npr,
+      npr => xuaxi_npr,
       npg => cpu_npg,
 
-      bus_addr_match => xubf_addr_match,
+      bus_addr_match => xuaxi_addr_match,
       bus_addr => localunibus_addr,
-      bus_dati => xubf_dati,
+      bus_dati => xuaxi_dati,
       bus_dato => localunibus_dato,
       bus_control_dati => localunibus_control_dati,
       bus_control_dato => localunibus_control_dato,
       bus_control_datob => localunibus_control_datob,
 
-      bus_master_addr => localunibus_busmaster_xubf_addr,
+      bus_master_addr => localunibus_busmaster_xuaxi_addr,
       bus_master_dati => localunibus_busmaster_dati,
-      bus_master_dato => localunibus_busmaster_xubf_dato,
-      bus_master_control_dati => localunibus_busmaster_xubf_control_dati,
-      bus_master_control_dato => localunibus_busmaster_xubf_control_dato,
+      bus_master_dato => localunibus_busmaster_xuaxi_dato,
+      bus_master_control_dati => localunibus_busmaster_xuaxi_control_dati,
+      bus_master_control_dato => localunibus_busmaster_xuaxi_control_dato,
       bus_master_nxm => localbusmaster_nxmabort,
-
-      xubf_cs => xubf_cs,
-      xubf_mosi => xubf_mosi,
-      xubf_sclk => xubf_sclk,
-      xubf_miso => xubf_miso,
-      xubf_srdy => xubf_srdy,
 
       have_xu_esp => have_xu_esp,
 
+      s_axi_aclk    => net_s_axi_aclk,
+      s_axi_aresetn => net_s_axi_aresetn,
+      s_axi_awaddr  => net_s_axi_awaddr,
+      s_axi_awvalid => net_s_axi_awvalid,
+      s_axi_awready => net_s_axi_awready,
+      s_axi_wdata   => net_s_axi_wdata,
+      s_axi_wstrb   => net_s_axi_wstrb,
+      s_axi_wvalid  => net_s_axi_wvalid,
+      s_axi_wready  => net_s_axi_wready,
+      s_axi_bresp   => net_s_axi_bresp,
+      s_axi_bvalid  => net_s_axi_bvalid,
+      s_axi_bready  => net_s_axi_bready,
+      s_axi_araddr  => net_s_axi_araddr,
+      s_axi_arvalid => net_s_axi_arvalid,
+      s_axi_arready => net_s_axi_arready,
+      s_axi_rdata   => net_s_axi_rdata,
+      s_axi_rresp   => net_s_axi_rresp,
+      s_axi_rvalid  => net_s_axi_rvalid,
+      s_axi_rready  => net_s_axi_rready,
+
+      irq => net_irq,
+
       reset => xureset,
-      xubfclk => cpuclk,
       clk => nclk
    );
-   xubf_miso <= xu_miso;
-   xubf_srdy <= xu_srdy;
+   -- have_xu_esp now drives xuaxi (AXI-Lite/PS), not a physical SPI pin -
+   -- xu_cs/sclk/mosi only ever reflect xubl (the ENC424J600 option) now.
    xu_cs <= xubl_cs when have_xu_enc = 1
-      else xubf_cs when have_xu_esp = 1
       else '0';
    xu_sclk <= xubl_sclk when have_xu_enc = 1
-      else xubf_sclk when have_xu_esp = 1
       else '0';
    xu_mosi <= xubl_mosi when have_xu_enc = 1
-      else xubf_mosi when have_xu_esp = 1
       else '0';
 
    xubm0: xubm port map(
@@ -818,7 +872,7 @@ begin
       else kl0_dati when kl0_addr_match = '1'
       else kw0_dati when kw0_addr_match = '1'
       else xubl_dati when xubl_addr_match = '1'
-      else xubf_dati when xubf_addr_match = '1'
+      else xuaxi_dati when xuaxi_addr_match = '1'
       else xubm_dati when xubm_addr_match = '1'
       else xu_dati when local_addr_match = '1'
       else "0000000000000000";
@@ -828,7 +882,7 @@ begin
       or kl0_addr_match = '1'
       or kw0_addr_match = '1'
       or xubl_addr_match = '1'
-      or xubf_addr_match = '1'
+      or xuaxi_addr_match = '1'
       or xubm_addr_match = '1'
       or local_addr_match = '1'
       else '0';
@@ -853,31 +907,31 @@ begin
       else '0';
 
    localunibus_busmaster_addr <= localunibus_busmaster_xubl_addr when cpu_npg = '1' and xubl_npr = '1'
-      else localunibus_busmaster_xubf_addr when cpu_npg = '1' and xubf_npr = '1'
+      else localunibus_busmaster_xuaxi_addr when cpu_npg = '1' and xuaxi_npr = '1'
       else localunibus_busmaster_xubm_addr when cpu_npg = '1' and xubm_npr = '1'
       else "000000000000000000";
    localunibus_busmaster_dato <= localunibus_busmaster_xubl_dato when cpu_npg = '1' and xubl_npr = '1'
-      else localunibus_busmaster_xubf_dato when cpu_npg = '1' and xubf_npr = '1'
+      else localunibus_busmaster_xuaxi_dato when cpu_npg = '1' and xuaxi_npr = '1'
       else localunibus_busmaster_xubm_dato when cpu_npg = '1' and xubm_npr = '1'
       else "0000000000000000";
    localunibus_busmaster_control_dati <= localunibus_busmaster_xubl_control_dati when cpu_npg = '1' and xubl_npr = '1'
-      else localunibus_busmaster_xubf_control_dati when cpu_npg = '1' and xubf_npr = '1'
+      else localunibus_busmaster_xuaxi_control_dati when cpu_npg = '1' and xuaxi_npr = '1'
       else localunibus_busmaster_xubm_control_dati when cpu_npg = '1' and xubm_npr = '1'
       else '0';
    localunibus_busmaster_control_dato <= localunibus_busmaster_xubl_control_dato when cpu_npg = '1' and xubl_npr = '1'
-      else localunibus_busmaster_xubf_control_dato when cpu_npg = '1' and xubf_npr = '1'
+      else localunibus_busmaster_xuaxi_control_dato when cpu_npg = '1' and xuaxi_npr = '1'
       else localunibus_busmaster_xubm_control_dato when cpu_npg = '1' and xubm_npr = '1'
       else '0';
    localunibus_busmaster_control_datob <= '0' when cpu_npg = '1' and xubl_npr = '1'
-      else '0' when cpu_npg = '1' and xubf_npr = '1'
+      else '0' when cpu_npg = '1' and xuaxi_npr = '1'
       else '0' when cpu_npg = '1' and xubm_npr = '1'
       else '0';
    localunibus_busmaster_control_npg <= '1' when cpu_npg = '1' and xubl_npr = '1'
-      else '1' when cpu_npg = '1' and xubf_npr = '1'
+      else '1' when cpu_npg = '1' and xuaxi_npr = '1'
       else '1' when cpu_npg = '1' and xubm_npr = '1'
       else '0';
 
-   cpu_npr <= '1' when xubl_npr = '1' or xubf_npr = '1' or xubm_npr = '1' else '0';
+   cpu_npr <= '1' when xubl_npr = '1' or xuaxi_npr = '1' or xubm_npr = '1' else '0';
 
    bus_master_addr <= xubm_addr;
    bus_master_dato <= xubm_dato;
