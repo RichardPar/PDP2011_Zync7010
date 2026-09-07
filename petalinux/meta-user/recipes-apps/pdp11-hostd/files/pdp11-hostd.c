@@ -74,6 +74,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <signal.h>
+#include <poll.h>
 #include <pthread.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -211,9 +212,13 @@ static net_t g_net = {
  * of a stale read is one extra frame accepted or dropped. */
 static volatile uint32_t guest_ip = 0;
 
-/* RX filter stats, for judging whether the guest is being buried in noise. */
+/* RX filter/queue stats, for judging whether the guest is being buried in
+ * noise and whether we are ever having to drop on our own side. */
 static volatile unsigned long rx_acc_unicast, rx_acc_bcast,
-                              rx_drop_bcast, rx_drop_other;
+                              rx_drop_bcast, rx_drop_other, rx_drop_qfull;
+
+/* TX queue stats (defined here for build_status_json above the queue). */
+static volatile unsigned long tx_enq, tx_written, tx_drop_qfull;
 
 /* The station address xu.vhd's embedded microcode (xubw.mac) latches from
  * the first rx_buf header it ever sees (dbia/dlaa start zeroed in ROM, see
@@ -618,7 +623,9 @@ static void build_status_json(char *b, size_t n)
             "\"ifetch_count\":%u,\"xubm_run_count\":%u,"
             "\"guest_ip\":\"%u.%u.%u.%u\","
             "\"rx_acc_unicast\":%lu,\"rx_acc_bcast\":%lu,"
-            "\"rx_drop_bcast\":%lu,\"rx_drop_other\":%lu}",
+            "\"rx_drop_bcast\":%lu,\"rx_drop_other\":%lu,"
+            "\"rx_drop_qfull\":%lu,"
+            "\"tx_enq\":%lu,\"tx_written\":%lu,\"tx_drop_qfull\":%lu}",
             g_net.present ? "true" : "false", g_net.ifname, g_net.heartbeat_last,
             g_net.heartbeat_alive ? "true" : "false",
             (unsigned long long)(g_net.heartbeat_last_change_ms ?
@@ -635,7 +642,8 @@ static void build_status_json(char *b, size_t n)
             debug3 & 0xffff, (debug3 >> 16) & 0xffff,
             (guest_ip >> 24) & 0xff, (guest_ip >> 16) & 0xff,
             (guest_ip >> 8) & 0xff, guest_ip & 0xff,
-            rx_acc_unicast, rx_acc_bcast, rx_drop_bcast, rx_drop_other);
+            rx_acc_unicast, rx_acc_bcast, rx_drop_bcast, rx_drop_other,
+            rx_drop_qfull, tx_enq, tx_written, tx_drop_qfull);
     }
     snprintf(b + o, n - o, "}\n");
 }
@@ -711,14 +719,37 @@ static void *http_thread(void *arg)
     lfd = socket(AF_INET, SOCK_STREAM, 0);
     if (lfd < 0) { log_msg("API: socket: %s", strerror(errno)); return NULL; }
     setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    /* Same trap the tap fd fell into (see open_tap): setup_bridge() runs
+     * system("udhcpc ... -b"), which backgrounds itself and would inherit
+     * this listening socket, pinning the port for the life of that child.
+     * Observed for real - :8080 stayed in LISTEN with queued connections
+     * after every pdp11-hostd had been killed, and no process appeared to
+     * own it, so SO_REUSEADDR could not help and the API stayed dead until
+     * a reboot. */
+    if (fcntl(lfd, F_SETFD, FD_CLOEXEC) < 0)
+        log_msg("API: warning: fcntl(FD_CLOEXEC) on listen fd failed: %s", strerror(errno));
     memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
     sa.sin_addr.s_addr = INADDR_ANY;
     sa.sin_port = htons((uint16_t)http_port);
-    if (bind(lfd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        log_msg("API: bind :%d failed (%s) - REST API disabled", http_port, strerror(errno));
-        close(lfd);
-        return NULL;
+    /* Retry briefly: restarting the daemon immediately after killing the
+     * previous one can race the old listening socket's teardown, and losing
+     * the REST API for the whole run just because we were 4ms too early is
+     * not a useful failure (observed exactly that during debugging). */
+    {
+        int attempt;
+        for (attempt = 0; ; attempt++) {
+            if (bind(lfd, (struct sockaddr *)&sa, sizeof(sa)) == 0) break;
+            if (errno != EADDRINUSE || attempt >= 10) {
+                log_msg("API: bind :%d failed (%s) - REST API disabled",
+                        http_port, strerror(errno));
+                close(lfd);
+                return NULL;
+            }
+            if (attempt == 0)
+                log_msg("API: :%d busy, retrying for up to 5s", http_port);
+            usleep(500000);
+        }
     }
     listen(lfd, 4);
     log_msg("API: REST server on http://0.0.0.0:%d/ (status,images,load,unload)", http_port);
@@ -1081,7 +1112,14 @@ static int open_tap(const char *ifname)
     if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0)
         log_msg("NET: warning: fcntl(FD_CLOEXEC) on tap fd failed: %s", strerror(errno));
 
-    log_msg("NET: opened tap device %s (fd %d)", ifname, fd);
+    /* Non-blocking: rx_thread poll()s and then drains until EAGAIN, and
+     * tx_thread must never park inside write() holding up queued frames.
+     * Neither of them is on the critical path of serve_net(), which is what
+     * actually has to answer the core's interrupt promptly. */
+    if (fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK) < 0)
+        log_msg("NET: warning: fcntl(O_NONBLOCK) on tap fd failed: %s", strerror(errno));
+
+    log_msg("NET: opened tap device %s (fd %d, non-blocking)", ifname, fd);
     return fd;
 }
 
@@ -1215,24 +1253,129 @@ static void *rx_thread(void *arg)
     uint8_t buf[MAXPAY];
 
     for (;;) {
-        ssize_t n = read(fd, buf, sizeof(buf));
-        if (n < 0) {
-            if (errno == EINTR) { if (g_stop) break; continue; }
-            log_msg("NET: rx_thread: read(tap) failed: %s", strerror(errno));
+        struct pollfd pfd;
+        int pr;
+
+        if (g_stop) break;
+
+        /* Wait with a timeout rather than parking in read() forever, so
+         * g_stop is honoured promptly on shutdown. */
+        pfd.fd = fd;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        pr = poll(&pfd, 1, 200);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            log_msg("NET: rx_thread: poll(tap) failed: %s", strerror(errno));
             break;
         }
-        if (n < 1) continue;
-        if (!rx_addressed_to_us(buf, (int)n)) continue;
+        if (pr == 0) continue;                      /* idle tick */
 
-        pthread_mutex_lock(&rxq_lock);
-        if (rxq_count < RXQ_DEPTH) {
-            memcpy(rxq[rxq_head].buf, buf, (size_t)n);
-            rxq[rxq_head].len = (int)n;
-            rxq_head = (rxq_head + 1) % RXQ_DEPTH;
-            rxq_count++;
-        } /* else: queue full, drop - matches a real NIC's ring-full behaviour */
-        pthread_mutex_unlock(&rxq_lock);
+        /* Drain everything currently readable - one poll() wakeup can cover
+         * several queued frames, and leaving them sitting in the kernel's
+         * tap queue just delays them. */
+        for (;;) {
+            ssize_t n = read(fd, buf, sizeof(buf));
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+                log_msg("NET: rx_thread: read(tap) failed: %s", strerror(errno));
+                return NULL;
+            }
+            if (n < 1) break;
+            if (!rx_addressed_to_us(buf, (int)n)) continue;
+
+            pthread_mutex_lock(&rxq_lock);
+            if (rxq_count < RXQ_DEPTH) {
+                memcpy(rxq[rxq_head].buf, buf, (size_t)n);
+                rxq[rxq_head].len = (int)n;
+                rxq_head = (rxq_head + 1) % RXQ_DEPTH;
+                rxq_count++;
+            } else {
+                rx_drop_qfull++;   /* full: drop, as a real NIC's ring does */
+            }
+            pthread_mutex_unlock(&rxq_lock);
+        }
     }
+    return NULL;
+}
+
+/* ---- outbound (guest -> LAN) queue -------------------------------------
+ * serve_net() must answer the core's interrupt and hand back rx_buf as fast
+ * as it can; it has no business sitting in a write() to tap0 while the run
+ * engine waits on it. So it only enqueues here, and tx_thread does the
+ * actual (non-blocking) write. Same drop-when-full policy as RX: a real
+ * overloaded interface drops rather than adding unbounded delay. */
+typedef struct {
+    uint8_t buf[MAXPAY];
+    int     len;
+} txframe_t;
+
+#define TXQ_DEPTH 32
+static txframe_t txq[TXQ_DEPTH];
+static int txq_head = 0, txq_tail = 0, txq_count = 0;
+static pthread_mutex_t txq_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  txq_cv   = PTHREAD_COND_INITIALIZER;
+
+static void txq_push(const uint8_t *b, int len)
+{
+    if (len < 1 || len > MAXPAY) return;
+    pthread_mutex_lock(&txq_lock);
+    if (txq_count < TXQ_DEPTH) {
+        memcpy(txq[txq_head].buf, b, (size_t)len);
+        txq[txq_head].len = len;
+        txq_head = (txq_head + 1) % TXQ_DEPTH;
+        txq_count++;
+        tx_enq++;
+        pthread_cond_signal(&txq_cv);
+    } else {
+        tx_drop_qfull++;
+    }
+    pthread_mutex_unlock(&txq_lock);
+}
+
+static void *tx_thread(void *arg)
+{
+    net_t *n = (net_t *)arg;
+
+    for (;;) {
+        txframe_t f;
+
+        pthread_mutex_lock(&txq_lock);
+        while (txq_count == 0 && !g_stop) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            ts.tv_sec += 1;
+            pthread_cond_timedwait(&txq_cv, &txq_lock, &ts);
+        }
+        if (txq_count == 0) {           /* woken only by g_stop */
+            pthread_mutex_unlock(&txq_lock);
+            if (g_stop) break;
+            continue;
+        }
+        f = txq[txq_tail];
+        txq_tail = (txq_tail + 1) % TXQ_DEPTH;
+        txq_count--;
+        pthread_mutex_unlock(&txq_lock);
+
+        for (;;) {
+            ssize_t w = write(n->tapfd, f.buf, (size_t)f.len);
+            if (w >= 0) { tx_written++; break; }
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                struct pollfd pfd;
+                pfd.fd = n->tapfd;
+                pfd.events = POLLOUT;
+                pfd.revents = 0;
+                poll(&pfd, 1, 100);     /* tap0 backed up - wait briefly */
+                if (g_stop) break;
+                continue;
+            }
+            log_msg("NET: write(tap) failed: %s", strerror(errno));
+            break;
+        }
+    }
+    log_msg("NET: tx thread exiting");
     return NULL;
 }
 
@@ -1385,14 +1528,13 @@ static void *serve_net(void *arg)
         if (txlen >= HDRLEN && txbytes[0] == 0xa0 && txbytes[1] == 0xa0) {
             int framelen = (txbytes[4] << 8) | txbytes[5];
             if (framelen > 0 && framelen <= txlen - HDRLEN && framelen <= MAXPAY) {
-                ssize_t wr = write(n->tapfd, txbytes + HDRLEN, (size_t)framelen);
-                if (wr < 0)
-                    log_msg("NET: write(tap) failed: %s", strerror(errno));
-                else {
-                    learn_guest_ip(txbytes + HDRLEN, framelen);
-                    if (verbose)
-                        log_msg("NET: TX: %d bytes forwarded to %s", framelen, n->ifname);
-                }
+                /* Hand off to tx_thread rather than writing here: this
+                 * thread owes the core a prompt DONE, and tap0 must never
+                 * be allowed to stall the run engine. */
+                txq_push(txbytes + HDRLEN, framelen);
+                learn_guest_ip(txbytes + HDRLEN, framelen);
+                if (verbose)
+                    log_msg("NET: TX: %d bytes queued for %s", framelen, n->ifname);
             } else if (framelen > 0) {
                 log_msg("NET: TX: bad/oversized frame length %d (txlen=%d) - dropped",
                          framelen, txlen);
@@ -1457,10 +1599,11 @@ int main(int argc, char **argv)
     int rl_seed_n = 0;
     int have_config;
     int i;
-    pthread_t http_tid, rl_tid, rh_tid, net_tid, rxtid, hbtid;
+    pthread_t http_tid, rl_tid, rh_tid, net_tid, rxtid, hbtid, txtid;
     int rh_thread_started = 0;
     int net_thread_started = 0;
     int hb_thread_started = 0;
+    int tx_thread_started = 0;
     static const char *usage =
         "usage: pdp11-hostd [-v] [-s] [-r] [-d] [-p <port>] [-D <imgdir>] "
         "[-c <configfile>] [-R <rh0-image>] [-i <tap-ifname>] [-l <logfile>] "
@@ -1586,10 +1729,14 @@ int main(int argc, char **argv)
             if (pthread_create(&rxtid, NULL, rx_thread, &g_net.tapfd) != 0) {
                 log_msg("NET: pthread_create(rx_thread) failed (%s) - networking disabled "
                         "this run", strerror(errno));
+            } else if (pthread_create(&txtid, NULL, tx_thread, &g_net) != 0) {
+                log_msg("NET: pthread_create(tx_thread) failed (%s) - networking disabled "
+                        "this run", strerror(errno));
             } else if (pthread_create(&net_tid, NULL, serve_net, &g_net) != 0) {
                 log_msg("NET: pthread_create(serve_net) failed (%s) - networking disabled "
                         "this run", strerror(errno));
             } else {
+                tx_thread_started = 1;
                 net_thread_started = 1;
                 if (pthread_create(&hbtid, NULL, heartbeat_thread, &g_net) != 0)
                     log_msg("NET: pthread_create(heartbeat_thread) failed (%s) - "
@@ -1603,6 +1750,10 @@ int main(int argc, char **argv)
     pthread_join(rl_tid, NULL);
     if (rh_thread_started) pthread_join(rh_tid, NULL);
     if (net_thread_started) pthread_join(net_tid, NULL);
+    if (tx_thread_started) {
+        pthread_cond_broadcast(&txq_cv);   /* wake it so it sees g_stop */
+        pthread_join(txtid, NULL);
+    }
     if (hb_thread_started) pthread_join(hbtid, NULL);
 
     log_msg("=== pdp11-hostd exiting ===");
