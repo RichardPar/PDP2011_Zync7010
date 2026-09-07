@@ -1,4 +1,6 @@
-# Bring up XU networking via a PS-side "virtual ESP32" bridge
+# XU networking via a PS-side "virtual ESP32" bridge
+
+*Design, bring-up, and the two bugs that had to be found. Working on hardware.*
 
 ## Context
 
@@ -6,8 +8,8 @@ The project has twice attempted PDP-11 Ethernet by hand-writing a brand-new
 DEUNA command-dispatch FSM and descriptor-ring walker directly in `xu.vhd`
 (see memory `xu-ethernet-bridge`). Both attempts were abandoned after a long
 chain of RAM-inference/synthesis bugs, an LUT-budget overrun, and finally a
-guest-CPU IPL/PSW hang that was never root-caused; the repo is currently
-reset back to `b5b2c27` with none of that code present.
+guest-CPU IPL/PSW hang that was never root-caused; at the time of writing
+the repo had been reset back to `b5b2c27` with none of that code present.
 
 Investigating the **unmodified, currently-checked-in** `xu.vhd` found that it
 already contains a complete, working, upstream implementation of the DEUNA
@@ -18,8 +20,9 @@ pre-assembled DEUNA microcode (`xubr.mac` for the ENC424J600 variant,
 distribution. That microcode is what actually implements PCSR0-3,
 GETPCBB/GETCMD/WRF/PDMD, and the descriptor rings — i.e. exactly the
 protocol the hand-written FSM was trying (and struggling) to reimplement
-from SIMH source. It has never been enabled (`have_xu`/`have_xu_esp` are
-unset in `zynq_top.vhd`) or wired to real pins.
+from SIMH source. It had never been enabled (`have_xu`/`have_xu_esp` were
+unset in `zynq_top.vhd`) or wired to real pins — which is why both of the
+bugs found during bring-up had survived in the tree undetected.
 
 The ESP32 variant's own hardware interface (`xubf.vhd`) is deliberately
 tiny: 3 host registers (**XF** xmit-from address, **RT** receive-to
@@ -43,15 +46,27 @@ get right in hardware or software — that already works, unmodified, inside
 the microcode — only a byte-buffer shuttle plus a header format we already
 know exactly (down to the CRC32).
 
+## Status: WORKING on hardware — 0% packet loss
+
+2.11BSD on the guest does `ifconfig de0 <ip> up` and pings across the
+bridge with **0% loss** (41/41). Disks are unaffected. See
+"[What it took: two bugs](#what-it-took-two-bugs)" below for the two real
+defects that had to be found first, and "[Diagnostic registers]
+(#diagnostic-registers)" for the instrumentation that found them — that
+instrumentation is still in the design and is the first thing to reach for
+if this ever regresses.
+
+The rest of this document is the original design writeup, and it held up:
+the architecture below was implemented exactly as described and did not need
+rethinking. Both bugs were in the *implementation* of it, not the design.
+
+The build/test steps this section used to list as outstanding (full
+`./build.sh` for `CONFIG_TUN` and the new BD slave/UIO node, a live `dtc`
+dump to fix the dtsi interrupt-cell placeholder, then guest testing) are all
+done — the interrupt cell was verified against a real `dtc` dump and is
+correct.
+
 ## Architecture
-
-## Status: source-complete, standalone-synth-verified, NOT YET full-built or hardware-tested
-
-Everything below is implemented, not just planned. What's left before it can
-actually be tried on the board: a full `./build.sh` (bitstream + PetaLinux,
-needed for `CONFIG_TUN` and the new BD slave/UIO node), then a live `dtc`
-dump to fix the dtsi interrupt-cell placeholder (see below), then real
-guest testing.
 
 **FPGA side**
 - `vivado/pdp2011_core/core/xuaxi.vhd` (new): same local-unibus host
@@ -114,12 +129,12 @@ guest testing.
   `0x43020000`/64K (next free slot after the disk bridges).
 - `system-user.dtsi`: new `net_uio@43020000` node (`linux,uio-name =
   "pdp11net"`), same node-splitting requirement the RH11 bridge already
-  needed. **Its `interrupts` cell (`<0 0x22 4>`) is an UNVERIFIED
-  PLACEHOLDER** — computed the same way `rh_disk_uio`'s `0x21` was derived
-  (concat port index → `IRQ_F2P[index]` → GIC SPI 61+index → DT cell
-  SPI-32; this is concat index 5, so 61+5-32=0x22) but not yet checked
-  against a live `dtc` dump — same gotcha every AXI bridge in this project
-  has hit, not resolved differently this time.
+  needed. Its `interrupts` cell (`<0 0x22 4>`) was computed the same way
+  `rh_disk_uio`'s `0x21` was derived (concat port index → `IRQ_F2P[index]` →
+  GIC SPI 61+index → DT cell SPI-32; this is concat index 5, so
+  61+5-32=0x22), and has since been **verified correct against a live `dtc`
+  dump on the board** (`interrupts = <0x00 0x22 0x04>`) — the one gotcha
+  every AXI bridge in this project has hit, checked rather than assumed.
 
 **PS side**
 - **Update**: the standalone `pdp11-espd` daemon described below was
@@ -180,42 +195,163 @@ guest testing.
   - Compiles cleanly with the host `gcc -Wall -Wextra -pthread` (only the
     same class of benign warnings `pdp11-diskd.c` itself already has:
     unchecked `system()` return values, a conservative `snprintf`
-    truncation warning) — not yet cross-compiled or run.
+    truncation warning). Since cross-compiled, deployed and run on the
+    board — see the status section at the top.
 
-## Verification
+## What it took: two bugs
 
-1. **Done**: standalone out-of-context synth checks (`xuaxi` alone, `xu`
-   with all real submodules, `unibus` with all real submodules) — 0 errors
-   in all three; see the FPGA-side notes above for LUT/BRAM numbers.
-2. **Done**: host-compile check of `pdp11-espd.c` — 0 errors.
-3. **Not yet done** (needs real hardware): full `./build.sh` (bitstream +
-   PetaLinux); confirm `have_xu=>1` took effect via the M9312 boot ROM
-   device table (`174516 - 174510  xu`), as previously confirmed for the
-   abandoned attempt.
-4. Fix the dtsi interrupt-cell placeholder against a live `dtc` dump
-   (see the system-user.dtsi note above for the exact command).
-5. Confirm the *embedded* microcode CPU actually boots/runs — its `kl0`
-   console is wired to a debug tx pin (`xu_debug_tx` in `unibus.vhd`);
-   worth capturing during bring-up.
-6. Confirm `pdp11-espd` sees IRQ-driven (not polled) activity from first
-   boot.
-7. Same end-to-end test as the abandoned attempt used: boot 2.11BSD's
-   `disks/211bsd-rp06.img`, `ifconfig de0`, `ping`, with `tcpdump -i tap0`/
-   `-i br0` on the PS side. RSX-11M-PLUS DECnet (`NCP SET EXE STA ON` on
-   `UNA-0`) is worth a second try once basic IP works, since this is the
-   real DEUNA microcode rather than the earlier Phase-A-only hand-written
-   dispatch.
+Both were in the new bridge (`xuaxi.vhd`), not in the microcode, the
+daemon, or the AXI fabric. Neither could have been caught by synthesis —
+both needed hardware.
 
-## Known open risks (not resolved by standalone synth checks alone)
+### 1. SRDY polarity was inverted (the "guest hang")
 
-- The dtsi interrupt-cell placeholder (`0x22`) — see above.
-- LUT/timing budget on the xc7z010 with the embedded second CPU/MMU/UART
-  now active alongside the RH11/RL11 disk bridges: standalone checks put
-  the whole `xu` entity at 2798 LUTs (15.9%) and the whole `unibus` entity
-  (which also includes the *outer* cpu/mmu, RL/RH/RK, and every other
-  local-bus device) at 14227 LUTs (80.8%) — but that second number isn't
-  directly comparable to a real full-chip percentage (no BD-level modules
-  like `front_panel.vhd`, no cross-module optimization a real build gets,
-  and a couple of pre-existing black-box stubs like `cr11`/`m9312h*`
-  weren't resolvable standalone). The real number can only come from an
-  actual `./build.sh bitstream` run — not done yet.
+**Symptom**: `ifconfig de0` worked, then `ping` froze the guest completely —
+console dead, and *all* other guest activity stopped too (RH disk I/O went
+silent). Linux and the daemon stayed perfectly healthy. It looked exactly
+like a guest CPU or bus-arbitration fault, and a lot of time went into
+chasing it as one.
+
+**Cause**: **SRDY is active LOW.** `xuaxi.vhd` had
+`srdy <= '1' when state = s_idle else '0'` — reporting "busy" precisely when
+it was idle and ready.
+
+Three independent sources agree on the polarity, and any one of them would
+have settled it:
+
+- `xubf.vhd` (the module `xuaxi.vhd` replaces, still in the tree): `srdy`
+  comes straight off the physical ESP32's `xubf_srdy` pin, is **reset to
+  `'1'`**, and its DMA engine proceeds only `if npg = '1' and srdy = '0'`.
+  Its status-word assignment is byte-identical to ours.
+- `xubw.mac`'s main loop: `xubfc` (read that status word) then `bmi 30$` —
+  if **bit 15 is SET** it treats the frontend as *not* ready.
+- `30$` is nothing but `pcsrsrv` (host command servicing). The `20$` block
+  it skips is the **only** place the transmit ring is ever polled.
+
+So: idle → reported busy → the microcode branched past all payload
+processing forever → it never executed `xubf` → no run ever started → the
+engine stayed in `s_idle`. A self-sustaining deadlock.
+
+Every observed symptom follows from it, including the confusing ones:
+`run_start_count` stuck at 0, the transmit ring never polled, `ifetch_count`
+racing (it was spinning the main loop at full speed), and PCSR port commands
+*still being serviced* — because `30$`, the label it kept branching to, is
+exactly where command servicing lives. The guest wedge on top is 2.11BSD's
+`deintr()` → `destart()` → PDMD → DNI → BR5 loop livelocking at BR5, which
+starves the KL11 console at BR4 and stops all base-level work — hence disk
+I/O going quiet too.
+
+### 2. TX DMA captured one cycle too early (100% of transmits dropped)
+
+**Symptom**: after fixing SRDY, the guest transmitted and `ping` ran without
+hanging, but with **100% packet loss** and not a single error logged
+anywhere.
+
+**Cause**: `s_tx_req` asserted the address and `bus_master_control_dati`,
+then `s_tx_cap` latched `bus_master_dati` on the very next cycle. On xu0's
+local unibus — RAM behind its own `mmu0` — the data is not valid that soon,
+so `tx_buf(k)` received the word for address `k-1`. Every frame reached the
+daemon shifted two bytes, putting the `0xa0a0` magic at bytes 2-3 instead of
+0-1, so the daemon's magic check failed and it silently discarded
+everything.
+
+Proved directly from the daemon's own header dump:
+
+```
+NET: txbuf hdr 00 00 a0 a0 b0 00 ...   (before: magic at bytes 2-3)
+NET: txbuf hdr a0 a0 be 00 00 00 ...   (after:  magic at bytes 0-1)
+```
+
+**Fix**: an `s_tx_wait` state between request and capture. Note that
+`rh11.vhd` (production, works daily) and `xubf.vhd` both capture one cycle
+after asserting and are fine against *main* memory — so this is specific to
+the local unibus. `xubf.vhd` very likely carries the same latent bug; its
+DMA has never run on hardware either, since `have_xu` was 0 in every build
+before this work.
+
+RX was unaffected throughout, because writes are fire-and-forget (address,
+data and `dato` all asserted together).
+
+## Diagnostic registers
+
+Added to `xuaxi.vhd` to find the above, and deliberately kept — they cost
+about 130 flip-flops and roughly 80 LUTs, and each one eliminates a whole
+class of cause. All are also surfaced in `pdp11-hostd`'s `/status` JSON.
+
+| Offset | Name | Use |
+|---|---|---|
+| `0x100C` | HEARTBEAT | free-running counter in xu0's clock domain. Proves the clock is alive and reset isn't asserted — but **not** that the microcode is making progress (it ticks even if cpu0 is spinning or dead). |
+| `0x1010` | DEBUG1 | DMA FSM state + `srdy` (active low). |
+| `0x1014` | RUNSTATS | `run_start_count` / `run_done_count`. Stuck at 0 during an attempted transmit ⇒ the microcode never wrote RT at all. |
+| `0x1018` | DEBUG2 | PCSR0, PCSR1 port state, and outer/xubm/cpu0 npr+npg. |
+| `0x101C` | DEBUG3 | `ifetch_count` (cpu0 instruction fetches — distinguishes "microcode trapped" from "microcode spinning", which HEARTBEAT cannot) and `xubm_run_count` (guest-memory accesses). |
+
+The decisive triage is a single `/status` read: `ifetch_count` frozen ⇒
+microcode trapped or halted; `xubm_npr` high with `xubm_npg` low ⇒ waiting
+on a local bus grant; `ifetch_count` climbing but `run_start_count` stuck ⇒
+microcode running but never attempting a transfer (which is what pointed at
+SRDY).
+
+## Theories that were wrong
+
+Recorded because each cost real time, and re-deriving them would cost it
+again:
+
+- **`xubm.vhd` clock-domain crossing.** Its two processes run on `clk` and
+  `xubmclk`, which looked like an unsynchronised async crossing. It is not:
+  `nclk <= not clk` (`unibus.vhd:2593`), so they are the same net on
+  opposite edges, and `rh11.vhd` uses the identical idiom in production.
+- **BR5 interrupt starvation by RH.** Tested directly with RH idle; the
+  guest still hung.
+- **Descriptor `ERRS`/`BUFL` flagging.** Predicted `Ierrs` would track the
+  losses; measured `Ierrs` = 6 lifetime against 6000+ packets. Refuted.
+- **Payload corruption in the RX path.** Predicted ICMP bad-checksums would
+  climb with the losses; measured **+0** across a run with 7 losses.
+  Refuted.
+
+## The 1-in-6 receive loss (resolved)
+
+For a while the guest lost exactly every 6th inbound frame — `NRCV` is 6
+(`if_de.h`), one slot per ring revolution. The frames died silently in
+`xubw.mac`'s `pktin`, at `bit #100000,rdre+4 / beq 80$` ("descriptor not
+owned by the port"), which discards with **no error flag and no counter** —
+which is why nothing in `netstat` accounted for them.
+
+The measurement that localised it: daemon delivered 198/198 with zero queue
+drops; guest ping 42 sent / 35 received; `ip: total packets received` +35;
+`icmp: echo reply` +35; `icmp: bad checksums` +0. So the missing frames
+never reached IP, weren't corrupt, and weren't error-counted.
+
+**A clean reboot cleared it entirely (41/41, 0% loss)**, so it is not a
+standing defect. The cause was a persistent one-slot phase offset between
+the microcode's `rcurr` and the driver's `ds_rindex` — a fixed offset makes
+the port hit an un-recycled descriptor exactly once per lap, at any traffic
+rate, which is why it looked so structural. It was most likely self-inflicted
+by repeatedly restarting the daemon under a live guest during debugging;
+each restart can lose an in-flight run and shift the phase by one, and
+nothing resyncs the cursors short of a re-init.
+
+**If it recurs**, try `ifconfig de0 down` then `ifconfig de0 <ip> up` before
+rebooting: `deinit()` re-hangs all `NRCV` descriptors and issues `CMD_START`,
+whose microcode handler does `mov rdrbh,rcurrh / mov rdrbl,rcurrl`, resetting
+`rcurr` to the ring base. (Untested — a reboot is what actually fixed it.)
+
+## Round-trip time: why the guest always says 16.667 ms
+
+It is not transit time. On the wire, Linux answers in **90 µs**, and the
+bridge adds well under a millisecond. Three things stack up:
+
+- **~7.1 ms** is the guest itself — a PDP-11/44-class CPU running the
+  2.11BSD IP stack. This is the irreducible floor.
+- **0–16.7 ms** waiting for the next 60 Hz tick, because BSD defers
+  received-packet processing to software-interrupt level, which runs in step
+  with the KW11-L line clock (`kw11l_hz => 60`).
+- **Display quantisation**: 2.11BSD measures RTT in whole ticks, and a tick
+  *is* 16.667 ms, so any sub-tick round trip prints as exactly one tick.
+
+`ping` sends once per second, and 1 s is *exactly* 60 ticks, so the tick wait
+is the same every time — which is why the guest's own figure is always
+precisely 16.667. Measured from Linux (µs resolution), a 1.0 s interval gives
+a tightly phase-locked 7.302/7.718/8.446 ms, while a 0.37 s interval (22.2
+ticks, so the phase drifts) spreads to 7.144/15.783/22.960 — one full tick
+period, exactly as the explanation predicts.

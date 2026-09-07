@@ -45,6 +45,40 @@ device and refreshes incoming frames from it, reimplementing the real
 ESP32 reference firmware's exact wire framing against Linux networking
 instead of Wi-Fi.
 
+| Offset | Meaning |
+|---|---|
+| `0x0000`-`0x0C7F` | frame buffer window (write -> rx_buf, read -> tx_buf) |
+| `0x1000` | STATUS: bit0 = a run is pending |
+| `0x1004` | LEN: run length in bytes |
+| `0x1008` | DONE: daemon writes when tx drained and rx refreshed |
+| `0x100C` | HEARTBEAT (diagnostic) |
+| `0x1010` | DEBUG1: DMA state + srdy (diagnostic) |
+| `0x1014` | RUNSTATS: run start/done counts (diagnostic) |
+| `0x1018` | DEBUG2: PCSR0/1 + npr/npg (diagnostic) |
+| `0x101C` | DEBUG3: ifetch + guest-memory access counts (diagnostic) |
+
+The diagnostic registers are read-only and surfaced in `/status`. They are
+what localised the two bring-up bugs; the networking doc explains how to
+triage with them.
+
+### Threading
+
+`serve_net()` owes the core a prompt DONE, so it never touches the tap
+device: it only moves frames between the buffer window and two queues.
+`rx_thread` poll()s the (non-blocking) tap and drains to EAGAIN; `tx_thread`
+owns all injection. Both queues drop when full rather than adding unbounded
+delay, matching what a real overloaded interface does.
+
+### Receive filter
+
+A real DEUNA passes all broadcast; on a modern LAN that buries the guest's
+6-entry receive ring in ARP-for-other-hosts, mDNS and SSDP. So: unicast to us
+always; broadcast only for ARP targeting the guest's own IP, which is learned
+by snooping the guest's transmits (fail-open until known, so the guest can
+always be resolved in the first place). `/status` reports `rx_acc_unicast`,
+`rx_acc_bcast`, `rx_drop_bcast`, `rx_drop_other`, `rx_drop_qfull`, `tx_enq`,
+`tx_written`, `tx_drop_qfull` and the learned `guest_ip`.
+
 ## Running it
 
 ```

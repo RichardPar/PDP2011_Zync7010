@@ -1,0 +1,19 @@
+64 bytes from 192.168.10.185: icmp_seq=61 ttl=64 time=16.667 ms
+64 bytes from 192.168.10.185: icmp_seq=62 ttl=64 time=16.667 ms
+64 bytes from 192.168.10.185: icmp_seq=63 ttl=64 time=16.667 ms
+64 bytes from 192.168.10.185: icmp_seq=64 ttl=64 time=16.667 ms
+64 bytes from 192.168.10.185: icmp_seq=65 ttl=64 time=16.667 ms
+64 bytes from 192.168.10.185: icmp_seq=66 ttl=64 time=16.667 ms
+64 bytes from 192.168.10.185: icmp_seq=67 ttl=64 time=16.667 ms
+64 bytes from 192.168.10.185: icmp_seq=68 ttl=64 time=16.667 ms
+64 bytes from 192.168.10.185: icmp_seq=69 ttl=64 time=16.667 ms
+64 bytes from 192.168.10.185: icmp_seq=70 ttl=64 time=16.667 ms
+64 bytes from 192.168.10.185: icmp_seq=71 ttl=64 time=16.667 ms
+64 bytes from 192.168.10.185: icmp_seq=72 ttl=64 time=16.667 ms
+64 bytes from 192.168.10.185: icmp_seq=73 ttl=64 time=16.667 ms
+64 bytes from 192.168.10.185: icmp_seq=74 ttl=64 time=16.667 ms
+64 bytes from 192.168.10.185: icmp_seq=75 ttl=64 time=16.667 ms
+64 bytes from 192.168.10.185: icmp_seq=76 ttl=64 time=16.667 ms
+64 bytes from 192.168.10.185: icmp_seq=77 ttl=64 time=16.667 ms
+64 bytes from 192.168.10.185: icmp_seq=78 ttl=64 time=16.667 ms
+
