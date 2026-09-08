@@ -20,11 +20,7 @@ A port of the [pdp2011](https://pdp2011.sytse.net/) VHDL core (PDP-11/70,
 PS's DDR3, shared with a PetaLinux system running on the same chip. Part
 `xc7z010clg400-1`, toolchain Vivado 2023.2 + PetaLinux 2023.2.
 
-The model is set by `modelcode => 70` in `zynq_top.vhd` (it was 44 until
-2026-09-04, changed to match 2.11BSD's own `PDP11=70` assumption). The model
-code has knock-on effects rather than being cosmetic — most visibly
-`unibus.vhd` derives `have_rh70` from it, which puts the RH disk controller
-on its 22-bit DMA path.
+The model is set by `modelcode => 70` in `zynq_top.vhd` 
 
 The board boots PetaLinux on the ARM cores and the PDP-11 side at the same
 time; the PDP-11 boots whatever's on the RL0/DB0 image currently loaded (see
@@ -459,14 +455,14 @@ required. Accept and drop counts are reported by the `/status` endpoint.
 `bootrom => boot_pdp2011` (`zynq_top.vhd`) tries controllers in order rk, rl,
 rp: for each it first checks the controller's CSR responds on the bus at all
 (a UNIBUS-timeout trap through vector 4 skips straight to the next one if not),
-then attempts an actual read. Up to 2026-08-14 a real read error (device
+then attempts an actual read. A real read error (device
 present but nothing usable, e.g. an unloaded `pdp11-hostd` unit) didn't fall
 through — it just `reset` and retried the *same* device forever. Fixed
-2026-09-03: `rkgo`/`rlgo`/`rpgo`'s error paths in
-`vivado/pdp2011_core/core/m9312h-pdp2011.mac` now jump to the next device's
-probe instead (rk error -> `nork`/try rl, rl error -> `norl`/try rp, rp error
--> `boot`/wrap to rk), confirmed on hardware per the RH/RP06 section above. The
-`.mac` source lives next to the compiled `m9312h-pdp2011.vhd`; rebuilding it
+`rkgo`/`rlgo`/`rpgo`'s error paths in`vivado/pdp2011_core/core/m9312h-pdp2011.mac` 
+now jump to the next device's probe instead (rk error -> `nork`/try rl, rl 
+error -> `norl`/try rp, rp error-> `boot`/wrap to rk), confirmed on hardware 
+per the RH/RP06 section above. 
+The`.mac` source lives next to the compiled `m9312h-pdp2011.vhd`; rebuilding it
 needs upstream's `macro11`/`genblkram` toolchain (from
 `pdp2011.sytse.net`'s download tarball, not vendored in this repo).
 
@@ -546,9 +542,4 @@ kernel config, and device-tree overrides live in the PetaLinux project's
 `project-spec/meta-user`, which `build.sh`/`docker/plnx.sh` create and build
 outside this tree (default `../.petalinux-docker/work`, overridable).
 
-## FP11 floating point
 
-On (`have_fp => 1` in `zynq_top.vhd`). It was forced off on the earlier build
-to save space, but the 7010 doesn't notice — the whole design lands around
-39 % of the LUTs with the FPU in, and still makes timing. An 11/70 ships with
-an FP11 anyway, so this just stops forcing it off.
