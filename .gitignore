@@ -15,3 +15,11 @@ vivado/scripts/*.backup.log
 # Disk images - large binaries, either downloadable (see README) or local
 # test fixtures; don't belong in git history.
 disks/*.img
+
+# pdp11-hostd host-side build products. The PetaLinux recipe builds these in
+# the Yocto work dir; a standalone `make` in files/ (handy for testing the
+# web panel on a desktop) leaves them next to the sources.
+petalinux/meta-user/recipes-apps/pdp11-hostd/files/pdp11-hostd
+petalinux/meta-user/recipes-apps/pdp11-hostd/files/libhttpd.a
+petalinux/meta-user/recipes-apps/pdp11-hostd/files/httpd.o
+petalinux/meta-user/recipes-apps/pdp11-hostd/files/www_data.h

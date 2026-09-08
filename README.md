@@ -297,6 +297,40 @@ RL11 — its own `sddisk.vhd` AXI bridge, backed by an image file on the PS.
 Since `modelcode => 70` it runs as an RH70 rather than an RH11; see
 "File-backed RH/RP06 disk" below.
 
+## Web front panel
+
+Point a browser at `http://<board>:8080/` and you get the peripherals drawn as
+they really look: RL02 drive fronts with the packs turning behind their smoked
+windows, head-positioner carriages sitting on the cylinder the last request
+landed on, and the drives' own LOAD / READY / FAULT / WRITE PROT legend
+switches; the RP06 on its own geometry; TU58 cartridges when `tu58fs` is
+running; and a DEUNA panel with RUN, DMA, XMIT, RECV, CARRIER and DROP lamps
+over the frame counters. A console strip shows the last sector address on 16
+octal lamps. Everything is driven live over a WebSocket (~10 updates/s), and
+the lamps rise fast and decay slowly, so single sector transfers actually
+flicker.
+
+A **RESET** key on the console plate pulses the PDP-11-only reset (the same
+thing `pdp11_reset.sh` and the U15 button do), guarded by press-to-arm /
+press-again-to-fire so a stray click can't reboot a running RT-11.
+
+The panel only draws what's really there. RL shows DL0/DL1 plus any higher unit
+the persistent config has an image in (a **+ DL2** button reveals the next one
+when you want to mount into it); the TU58 rack appears only while `tu58fs` is
+answering on its control API, and vanishes again when it stops.
+
+Each drive carries a **MOUNT / UNMOUNT** control with a dropdown of the images
+in `/srv/pdp11`, calling the same `/load` and `/unload` endpoints `dlctl` uses
+— so a browser swap is persisted and survives a reboot like any other. The TU58
+tiles do the same through `tu58fs`'s own API, which the daemon proxies under
+`/tu58/` (plus SAVE, and TAKE OFFLINE for swapping cartridges safely).
+
+The page is served by `libhttpd`, a small no-dependency HTTP/1.1 + WebSocket
+server that lives with the daemon
+(`petalinux/meta-user/recipes-apps/pdp11-hostd/files/httpd.c`), and is
+compiled into the binary so deploying stays a single-file copy. Full writeup
+in that recipe's `README.md`.
+
 ## Swapping disks without a reboot
 
 `pdp11-hostd` runs a small REST API (port 8080 by default) so you can pull an
@@ -338,6 +372,9 @@ curl 'board:8080/load?unit=1&path=/srv/pdp11/games.img'
 curl 'board:8080/unload?unit=1'
 curl 'board:8080/load?unit=rh0&path=/srv/pdp11/rp06-2.11bsd.img'
 ```
+
+...or use the MOUNT/UNMOUNT controls on the web front panel above, which call
+exactly these endpoints.
 
 A swap is atomic against disk I/O — the daemon holds a lock across each sector
 transfer, so a load can't land in the middle of one. The RT-11/2.11BSD side has

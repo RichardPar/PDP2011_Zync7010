@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDP-11 Peripheral Status</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/panel.css">
+</head>
+<body>
+
+<div class="room">
+
+  <!-- ============ console strip: link state + last sector address ======= -->
+  <header class="console">
+    <div class="console-left">
+      <div class="brand">
+        <span class="digital">d&#124;i&#124;g&#124;i&#124;t&#124;a&#124;l</span>
+        <span class="model">PDP-11 &middot; PERIPHERAL STATUS</span>
+      </div>
+      <div class="sub" id="hostline">pdp11-hostd</div>
+    </div>
+
+    <div class="addrblock">
+      <div class="addr-label">SECTOR ADDRESS &mdash; LAST DISK REQUEST (OCTAL)</div>
+      <div class="addr-lamps" id="addrlamps"></div>
+      <div class="addr-scale" id="addrscale"></div>
+    </div>
+
+    <div class="console-right">
+      <div class="statlamps">
+        <div class="lamp sm" data-lamp="link"  data-color="green"><i></i><span class="txt off">LINK</span><span class="txt on">LINK</span></div>
+        <div class="lamp sm" data-lamp="disk"  data-color="white"><i></i><span class="txt off">DISK</span><span class="txt on">DISK</span></div>
+        <div class="lamp sm" data-lamp="netio" data-color="amber"><i></i><span class="txt off">NET</span><span class="txt on">NET</span></div>
+        <div class="lamp sm" data-lamp="err"   data-color="red"><i></i><span class="txt off">ERR</span><span class="txt on">ERR</span></div>
+      </div>
+      <div class="readout small">
+        <div><label>UPTIME</label><b id="uptime">--</b></div>
+        <div><label>VIEWERS</label><b id="viewers">--</b></div>
+        <div><label>LAST RESET</label><b id="lastreset">--</b></div>
+      </div>
+
+      <!-- guarded, because anything that can reach this page can reboot the
+           PDP-11 with it: the first press arms, the second fires -->
+      <button id="resetbtn" class="resetsw" title="pulse the PDP-11-only reset">
+        <span class="cap">RESET</span>
+        <span class="sub">PDP-11</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ============ RL11 / RL02 ========================================== -->
+  <section class="rack" id="rack-rl">
+    <div class="rack-head">
+      <h2>RL11 <span>&mdash; RL01/RL02 CARTRIDGE DISK</span></h2>
+      <div class="ctl-lamps">
+        <div class="lamp sm" data-lamp="rl-online" data-color="green"><i></i><span class="txt off">ONLINE</span><span class="txt on">ONLINE</span></div>
+        <div class="lamp sm" data-lamp="rl-busy"   data-color="amber"><i></i><span class="txt off">BUSY</span><span class="txt on">BUSY</span></div>
+        <div class="rack-stat" id="rl-stat">&mdash;</div>
+        <button class="addrive" id="rl-add" hidden>+ DL2</button>
+      </div>
+    </div>
+    <div class="drives" id="rl-drives"></div>
+  </section>
+
+  <!-- ============ RH11 / RP06 ========================================== -->
+  <section class="rack" id="rack-rh">
+    <div class="rack-head">
+      <h2>RH11 <span>&mdash; RP06 MASSBUS DISK</span></h2>
+      <div class="ctl-lamps">
+        <div class="lamp sm" data-lamp="rh-online" data-color="green"><i></i><span class="txt off">ONLINE</span><span class="txt on">ONLINE</span></div>
+        <div class="lamp sm" data-lamp="rh-busy"   data-color="amber"><i></i><span class="txt off">BUSY</span><span class="txt on">BUSY</span></div>
+        <div class="rack-stat" id="rh-stat">&mdash;</div>
+        <button class="addrive" id="rh-add" hidden>+ DB1</button>
+      </div>
+    </div>
+    <div class="drives" id="rh-drives"></div>
+  </section>
+
+  <!-- ============ TU58 / tu58fs ======================================== -->
+  <!-- hidden until tu58fs answers on its control API; see panel.js -->
+  <section class="rack" id="rack-tu58" hidden>
+    <div class="rack-head">
+      <h2>TU58 <span>&mdash; DECtape II (tu58fs)</span></h2>
+      <div class="ctl-lamps">
+        <div class="lamp sm" data-lamp="tu-online"  data-color="green"><i></i><span class="txt off">ONLINE</span><span class="txt on">ONLINE</span></div>
+        <div class="lamp sm" data-lamp="tu-offline" data-color="red"><i></i><span class="txt off">OFFLINE</span><span class="txt on">OFFLINE</span></div>
+        <div class="rack-stat" id="tu-stat">&mdash;</div>
+        <button class="addrive" id="tu-offbtn">TAKE OFFLINE</button>
+        <button class="addrive" id="tu-add" hidden>+ DD2</button>
+      </div>
+    </div>
+    <div class="drives" id="tu-drives"></div>
+  </section>
+
+  <!-- ============ DEUNA / XU0 ========================================== -->
+  <section class="rack" id="rack-net">
+    <div class="rack-head">
+      <h2>DEUNA <span>&mdash; XU0 UNIBUS ETHERNET</span></h2>
+      <div class="ctl-lamps">
+        <div class="lamp sm" data-lamp="net-online" data-color="green"><i></i><span class="txt off">ONLINE</span><span class="txt on">ONLINE</span></div>
+        <div class="rack-stat" id="net-stat">&mdash;</div>
+      </div>
+    </div>
+
+    <div class="deuna" id="deuna">
+      <div class="deuna-lamps">
+        <div class="lamp" data-lamp="n-run"  data-color="green"><i></i><span class="txt off">RUN</span><span class="txt on">RUN</span></div>
+        <div class="lamp" data-lamp="n-dma"  data-color="white"><i></i><span class="txt off">DMA</span><span class="txt on">DMA</span></div>
+        <div class="lamp" data-lamp="n-xmit" data-color="amber"><i></i><span class="txt off">XMIT</span><span class="txt on">XMIT</span></div>
+        <div class="lamp" data-lamp="n-recv" data-color="green"><i></i><span class="txt off">RECV</span><span class="txt on">RECV</span></div>
+        <div class="lamp" data-lamp="n-carr" data-color="green"><i></i><span class="txt off">CARRIER</span><span class="txt on">CARRIER</span></div>
+        <div class="lamp" data-lamp="n-drop" data-color="red"><i></i><span class="txt off">DROP</span><span class="txt on">DROP</span></div>
+      </div>
+
+      <div class="deuna-meters">
+        <div class="meter"><div class="bars" id="bars-tx"></div><label>XMIT</label></div>
+        <div class="meter"><div class="bars" id="bars-rx"></div><label>RECV</label></div>
+      </div>
+
+      <div class="deuna-plate">
+        <div class="plate-row"><label>STATION ADDRESS</label><b id="n-mac">--</b></div>
+        <div class="plate-row"><label>HOST INTERFACE</label><b id="n-if">--</b></div>
+        <div class="plate-row"><label>GUEST IP</label><b id="n-ip">--</b></div>
+        <div class="plate-row"><label>PCSR0</label><b id="n-pcsr">--</b></div>
+      </div>
+
+      <!-- one readout, one set of columns: the drop counts used to be a
+           prose sentence underneath, which read nothing like the rows above -->
+      <div class="deuna-counters">
+        <table>
+          <tr><th></th><th>FRAMES</th><th>BYTES</th><th>FRAMES/S</th></tr>
+          <tr><td>XMIT</td><td id="n-txf">0</td><td id="n-txb">0</td><td id="n-txr">0</td></tr>
+          <tr><td>RECV</td><td id="n-rxf">0</td><td id="n-rxb">0</td><td id="n-rxr">0</td></tr>
+          <tr class="subhead"><td colspan="4">DROPPED</td></tr>
+          <tr><td>BROADCAST</td><td id="n-dbc">0</td>
+              <td class="lbl">RX Q FULL</td><td id="n-drxq">0</td></tr>
+          <tr><td>NOT FOR US</td><td id="n-doth">0</td>
+              <td class="lbl">TX Q FULL</td><td id="n-dtxq">0</td></tr>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span id="lastmsg"></span>
+    pdp11-hostd &middot; served from the Zynq PS &middot;
+    <span id="feed">connecting&hellip;</span>
+  </footer>
+</div>
+
+<!-- template for one disk drive, cloned per unit -->
+<template id="tpl-drive">
+  <article class="drive">
+    <div class="drive-face">
+      <!-- the smoked window over the pack: you see the top platter turn -->
+      <div class="window">
+        <div class="platter"><div class="hub"></div><div class="sectormark"></div></div>
+        <div class="glass"></div>
+        <div class="nopack">NO<br>PACK</div>
+      </div>
+
+      <!-- head positioner rail: where the carriage is sitting, by cylinder -->
+      <div class="positioner">
+        <div class="rail">
+          <div class="ticks"></div>
+          <div class="carriage"><div class="head"></div></div>
+        </div>
+        <div class="railscale"><span>CYL 0</span><span class="cylmax">511</span></div>
+      </div>
+
+      <div class="drive-ctl">
+        <div class="selwin"><label>UNIT</label><b class="sel">0</b></div>
+        <div class="btns">
+          <div class="lamp" data-lamp="load"  data-color="white"><i></i><span class="txt off">LOAD</span><span class="txt on">LOAD</span></div>
+          <div class="lamp" data-lamp="ready" data-color="green"><i></i><span class="txt off">READY</span><span class="txt on">READY</span></div>
+          <div class="lamp" data-lamp="fault" data-color="red"><i></i><span class="txt off">FAULT</span><span class="txt on">FAULT</span></div>
+          <div class="lamp" data-lamp="wp"    data-color="amber"><i></i><span class="txt off">WRITE PROT</span><span class="txt on">WRITE PROT</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="drive-info">
+      <div class="ident"><b class="tag">DL0</b><span class="model">RL02</span></div>
+      <div class="pathline"><span class="path">&mdash; no pack loaded &mdash;</span><span class="size"></span></div>
+      <div class="counters">
+        <span><label>CYL</label><b class="cyl">0</b></span>
+        <span><label>BLOCK</label><b class="blk">0</b></span>
+        <span><label>READ</label><b class="rd">0</b></span>
+        <span><label>WRITE</label><b class="wr">0</b></span>
+        <span><label>ERR</label><b class="er">0</b></span>
+      </div>
+      <div class="swap">
+        <label class="swap-label">PACK</label>
+        <select class="imgsel"><option value="">&mdash; select image &mdash;</option></select>
+        <button class="btn-load">MOUNT</button>
+        <button class="btn-unload">UNMOUNT</button>
+      </div>
+    </div>
+  </article>
+</template>
+
+<!-- template for one TU58 cartridge drive -->
+<template id="tpl-tape">
+  <article class="drive tape">
+    <div class="drive-face">
+      <div class="cart">
+        <div class="reel a"></div>
+        <div class="reel b"></div>
+        <div class="cartlabel"><span class="fslabel">&mdash;</span></div>
+        <div class="notape">NO<br>CARTRIDGE</div>
+      </div>
+
+      <div class="drive-ctl">
+        <div class="selwin"><label>DRIVE</label><b class="sel">0</b></div>
+        <div class="btns">
+          <div class="lamp" data-lamp="load"  data-color="white"><i></i><span class="txt off">LOAD</span><span class="txt on">LOAD</span></div>
+          <div class="lamp" data-lamp="ready" data-color="green"><i></i><span class="txt off">READY</span><span class="txt on">READY</span></div>
+          <div class="lamp" data-lamp="wp"    data-color="amber"><i></i><span class="txt off">WRITE PROT</span><span class="txt on">WRITE PROT</span></div>
+          <div class="lamp" data-lamp="mod"   data-color="white"><i></i><span class="txt off">MODIFIED</span><span class="txt on">MODIFIED</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="drive-info">
+      <div class="ident"><b class="tag">DD0</b><span class="model">TU58</span></div>
+      <div class="pathline"><span class="path">&mdash; no cartridge &mdash;</span><span class="size"></span></div>
+      <div class="counters">
+        <span><label>FS</label><b class="fs">&mdash;</b></span>
+        <span><label>BLOCKS</label><b class="blocks">&mdash;</b></span>
+        <span><label>MODE</label><b class="mode">&mdash;</b></span>
+      </div>
+      <div class="swap">
+        <label class="swap-label">TAPE</label>
+        <select class="imgsel"><option value="">&mdash; select image &mdash;</option></select>
+        <select class="fssel" title="filesystem, used when mounting a shared directory">
+          <option value="rt11">RT11</option>
+          <option value="xxdp">XXDP</option>
+        </select>
+        <button class="btn-load">MOUNT</button>
+        <button class="btn-save">SAVE</button>
+        <button class="btn-unload">UNMOUNT</button>
+      </div>
+    </div>
+  </article>
+</template>
+
+<script src="/panel.js"></script>
+</body>
+</html>

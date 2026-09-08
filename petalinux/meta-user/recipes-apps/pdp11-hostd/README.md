@@ -12,6 +12,10 @@ The recipe ships three things: the daemon (`/usr/bin/pdp11-hostd`), its
 SysV init script, and `dlctl` (`/usr/bin/dlctl`), the client for the
 runtime disk image-swap API. It `RDEPENDS` on `curl`, which `dlctl` uses.
 
+The daemon also serves a **web front panel** on the same port - point a
+browser at `http://<board>:8080/` and you get the drives and the DEUNA
+drawn as the real peripherals, lamps and all. See "Web front panel" below.
+
 Each served device is independently optional at runtime: RL is required
 (fatal if its UIO device isn't found), RH and the network bridge are both
 "disabled this run" if their UIO devices aren't present - e.g. a bitstream
@@ -79,10 +83,129 @@ always be resolved in the first place). `/status` reports `rx_acc_unicast`,
 `rx_acc_bcast`, `rx_drop_bcast`, `rx_drop_other`, `rx_drop_qfull`, `tx_enq`,
 `tx_written`, `tx_drop_qfull` and the learned `guest_ip`.
 
+## Web front panel
+
+`http://<board>:8080/` - the peripherals as they actually look, driven by
+the counters the daemon already keeps:
+
+* **RL11 / RL02** - a drive front per configured unit. Each has the pack turning
+  behind its smoked window (stopped and greyed when nothing is mounted), a
+  head-positioner rail whose carriage sits on the cylinder the last request
+  landed on, and the drive's own four legend switches: **LOAD** (lit = no
+  pack), **READY**, **FAULT** (lit for a couple of seconds after an I/O
+  error), **WRITE PROT** (lit when the image could only be opened
+  read-only). Under each: the image path and size, the cylinder, the last
+  block in octal, and read/write/error counts.
+* **RH11 / RP06** - the same, one drive (DB0), on RP06 geometry (418
+  sectors/cylinder, 815 cylinders) instead of RL02's.
+* **TU58 / DECtape II** - only when `tu58fs` is running; see below.
+* **DEUNA / XU0** - RUN, DMA, XMIT, RECV, CARRIER and DROP lamps, log-scaled
+  frame-rate meters, the station-address plate (MAC, tap device, the guest
+  IP learned by snooping, PCSR0 in octal) and the frame/byte/drop counters.
+* **Console strip** - a 16-lamp register showing the last sector address in
+  octal, plus LINK/DISK/NET/ERR.
+* **Event log** - mounts, unmounts, resets and I/O errors as they happen.
+
+There is also a **RESET** key on the console plate. It pulses the PDP-11-only
+reset - the same thing the init script's `-r` does at boot and the U15 button
+does in hardware, so only the PDP-11 core and its DDR bridge restart; Linux,
+this daemon and the mounted disks are untouched and the machine reboots from
+whatever is in DL0/DB0 right now. It is guarded by an arm/fire pair (press
+once to arm, again within 5s to fire, and it disarms itself) rather than a
+dialog, because anything that can reach this page can reboot the PDP-11 with
+it. The daemon rate-limits it to one reset per 3s, so a double-click can't
+interrupt the boot it just started, and reports a real error if `/dev/mem`
+isn't reachable rather than claiming success.
+
+Lamps aren't CSS transitions: each carries an intensity that rises fast and
+decays slowly, so a lamp lit by one sector transfer flickers the way a
+filament does rather than snapping on and off.
+
+### Which drives get a front
+
+The RL11 core addresses four units, but a real installation here runs two, and
+a panel padded out with drives that were never wired up is just noise. So the
+daemon marks a unit `show` in the panel JSON when it is below the bus's
+`min_units` (2 for RL, 1 for RH) **or** when the persistent config actually put
+an image in it - mount DL2 and its front appears, unmount it and the front goes
+away. To mount into a unit that has no front, the rack head offers a **+ DL2**
+button that reveals the next one.
+
+Change `min_units` in the `bus_t` initialisers in `pdp11-hostd.c` if the
+installation grows a third and fourth RL drive.
+
+Every drive has a **MOUNT / UNMOUNT** control with a dropdown of the images
+in the daemon's image directory (`-D`, default `/srv/pdp11`) - the same
+`/load` and `/unload` calls `dlctl` makes, so a swap made in the browser is
+persisted to `diskd.conf` and survives a reboot exactly as one made from the
+command line. The RT-11 caveat applies just as much here: don't swap DL0/DB0
+out from under a running system.
+
+### TU58 (tu58fs)
+
+The DECtape II is the odd one out: `tu58fs` is a **separate process** driving a
+real serial line to the PDP-11 (a `ttyUL*`), not one of our AXI bridges, and it
+carries its own HTTP control API (`--api`, default `:8081`). See the top-level
+README, "Serial consoles and TU58".
+
+So the daemon polls it (once a second - tape state changes at human speed) and
+passes its `/status` body through **verbatim** as the `tu58` member of
+`/api/state`. No JSON parser on this side, and any field a later `tu58fs` adds
+arrives for free. `/tu58/status`, `/tu58/images`, `/tu58/load`, `/tu58/unload`,
+`/tu58/save` and `/tu58/offline` proxy the control routes, so the page stays
+same-origin and no second port has to be exposed. `-T <port>` picks the port,
+`-T 0` disables both the poll and the proxy.
+
+`tu58fs` is started by hand on whichever port the tape is wired to, so **"not
+running" is a normal state, not an error**: `tu58` comes back `null` and the
+panel hides the whole TU58 rack rather than showing dead hardware. Start
+`tu58fs --api` and the rack appears on its own within a second.
+
+The tiles are cartridges: reels, a paper label carrying the DEC filesystem
+(or `TU58` for a raw image), and LOAD / READY / WRITE PROT / MODIFIED lamps.
+MODIFIED is `tu58fs`'s `changed` - the image in memory differs from the file,
+and **SAVE** writes it back. MOUNT takes a file, or a directory, which is
+mounted as a shared drive (`shared=1`) with the filesystem from the picker
+beside it. **TAKE OFFLINE** is `tu58fs`'s own offline mode, which lifts every
+cartridge so they can be swapped safely.
+
+One honest limitation: `tu58fs` keeps no per-block transfer counters, so
+there is nothing to flicker a lamp per read the way the disks do. READY blips
+when a poll shows the drive's state moved, and MODIFIED covers the write side;
+per-transfer activity would need counters added upstream.
+
+### How it's served
+
+`libhttpd` (`files/httpd.c`, built as `libhttpd.a`) is a small embedded
+HTTP/1.1 + WebSocket server written for this: no external dependencies (its
+own SHA-1 and base64 for the RFC 6455 handshake, so nothing new enters the
+rootfs), one thread per connection, keep-alive, and a broadcast call any
+thread can make. It replaced the previous hand-rolled request loop; the REST
+endpoints below are byte-for-byte the same, so `dlctl` and the scripts in
+`scripts/` are unaffected.
+
+| Endpoint | What |
+|---|---|
+| `GET /` | the front panel |
+| `GET /api/state` | the panel's snapshot (per-unit counters, net counters) |
+| `GET /ws` | WebSocket: the same snapshot ~10x/s, plus event lines |
+| `GET /status`, `/images`, `/load`, `/unload` | the original REST API, unchanged |
+| `POST /reset` | pulse the PDP-11-only reset (GET works too) |
+| `GET /tu58/*` | proxied to `tu58fs`'s control API (see above) |
+
+The panel pushes nothing when no browser is connected, and every action goes
+through the REST endpoints - the socket carries no commands.
+
+The page (`files/www/`) is compiled into the binary by `mkwww.sh` at build
+time, because `scripts/deploy_pdp11_hostd.sh` installs the daemon by copying
+a single ARM ELF to the board: assets under `/usr/share` would silently go
+stale behind every quick redeploy. `-W <dir>` serves them from a directory
+instead when you want to iterate on the CSS without a cross-compile.
+
 ## Running it
 
 ```
 pdp11-hostd [-v] [-s] [-r] [-d] [-p <port>] [-D <dir>] [-c <config>] \
-            [-R <rh0.img>] [-i <tap-ifname>] [-l <log>] \
-            [<dl0.img> [<dl1.img> ...]]
+            [-R <rh0.img>] [-i <tap-ifname>] [-W <wwwdir>] [-T <tu58-port>] \
+            [-l <log>] [<dl0.img> [<dl1.img> ...]]
 ```

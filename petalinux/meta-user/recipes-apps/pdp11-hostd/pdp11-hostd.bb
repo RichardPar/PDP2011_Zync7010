@@ -8,11 +8,20 @@ pdp11-espd pair now that all three device bridges share one AXI-Lite \
 expansion bus in the FPGA fabric. Auto-started at boot (SysV init) with -r \
 so it resets the PDP-11 and serves its boot; remembers which disk image is \
 loaded in which unit in a persistent config file (see -c) and restores it \
-across a reboot."
+across a reboot. Also serves a web front panel on the same port: DEC-styled \
+RL02/RP06 drive fronts and a DEUNA panel whose lamps follow the real \
+counters, live over a WebSocket, with mount/unmount controls per drive. The \
+page is built into the binary (see mkwww.sh) so deploying the daemon is \
+still a single file copy; libhttpd (httpd.c) serves it with no new runtime \
+dependency."
 LICENSE = "CLOSED"
 
 SRC_URI = "file://Makefile \
            file://pdp11-hostd.c \
+           file://httpd.c \
+           file://httpd.h \
+           file://mkwww.sh \
+           file://www \
            file://pdp11-hostd.init \
            file://dlctl.sh"
 S = "${WORKDIR}"
