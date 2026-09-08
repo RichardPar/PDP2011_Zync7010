@@ -13,6 +13,34 @@ I would be hard pressed to decline! It would be greatly welcomed
 whole project is built on. Usagi Electric and Dave Plummer on YouTube were the
 spark for wanting a real PDP-11 running again in the first place.
 
+## Overview
+
+A port of the [pdp2011](https://pdp2011.sytse.net/) VHDL core (PDP-11/44,
+22-bit MMU) to a Zynq-7010. Main memory lives in the PS's DDR3, shared with a
+PetaLinux system running on the same chip. Part `xc7z010clg400-1`, toolchain
+Vivado 2023.2 + PetaLinux 2023.2.
+
+The board boots PetaLinux on the ARM cores and the PDP-11 side at the same
+time; the PDP-11 boots whatever's on the RL0/DB0 image currently loaded (see
+"Swapping disks without a reboot"). RT-11 V5.3, RSX-11, and 2.11BSD (over the
+RH11/RP06 bridge) have all booted on this board.
+
+Peripherals, and where each is documented:
+
+| Device | Backed by | Section |
+|---|---|---|
+| KL11 `kl0` console | physical FPGA pins (P20/T19) | "Serial consoles and TU58" |
+| KL11 `kl1`-`kl3` | `axi_uartlite` ↔ Linux `/dev/ttyUL*` | "Serial consoles and TU58" |
+| RL11 disks (DL0-DL3) | image files on the PS over AXI | "File-backed RL disk" |
+| RH11/RP06 disk (DB0) | image file on the PS over AXI | "File-backed RH/RP06 disk" |
+| XU (DEUNA) Ethernet | Linux `tap0` bridged to `eth0` over AXI | "Networking" |
+| TU58 tape | `tu58fs` on the PS | "Serial consoles and TU58" |
+
+The RL11 and RH11 disks both started on a physical microSD (`sdspi.vhd`) and
+were later moved to image files served by the PS. All three PS-facing bridges
+(two disk, one network) share a single AXI-Lite expansion bus and are served
+by one daemon, `pdp11-hostd`.
+
 ## Building
 
 Everything is built by the top-level **`./build.sh`** — bitstream, then the full
@@ -75,24 +103,13 @@ In `project-spec/meta-user`:
   `reg = <0x1f800000 0x800000>`.
 - `pdp11-scripts` recipe — installs `pdp11_reset.sh`.
 - `tu58fs` and `picocom` recipes, plus `bsp.cfg` enabling
-  `CONFIG_SERIAL_UARTLITE`.
+  `CONFIG_SERIAL_UARTLITE` (the `kl1`-`kl3` consoles) and `CONFIG_TUN` (the
+  network bridge's tap device).
+- `pdp11-hostd` recipe — the daemon serving both disk bridges and the network
+  bridge, plus `dlctl` for the runtime disk-swap API.
+- UIO nodes in `system-user.dtsi` for each PS-facing bridge: `disk_uio`,
+  `rh_disk_uio`, `net_uio`.
 - rootfs on the SD's ext4 partition (`root=/dev/mmcblk0p2`), not initrd.
-
-A port of the [pdp2011](https://pdp2011.sytse.net/) VHDL core (PDP-11/44,
-22-bit MMU, RL11 disk on microSD) to a Zynq-7010. Main memory lives in the
-PS's DDR3, shared with a PetaLinux system running on the same chip.
-
-The board boots PetaLinux on the ARM cores and the PDP-11 side at the same
-time; the PDP-11 boots whatever's on the RL0/DB0 image currently loaded (see
-"Swapping disks without a reboot") — RT-11 V5.3, RSX-11, and 2.11BSD (over the
-RH11/RP06 bridge) have all booted on this board. Part `xc7z010clg400-1`,
-toolchain Vivado 2023.2 + PetaLinux 2023.2.
-
-The primary console (`kl0`) uses physical FPGA pins; three more (`kl1`-`kl3`)
-are bridged to Linux over `/dev/ttyUL*` (see "Serial consoles and TU58"
-below). The RL11 disk started on a physical SD (`sdspi.vhd`) and was later
-moved to an image file on the PS served over AXI — see "File-backed RL disk"
-below.
 
 ## Deploying
 
@@ -365,57 +382,62 @@ cell Xilinx's generator already computed for it rather than trying to derive
 it — if the BD's IRQ_F2P wiring ever moves, that value goes stale silently;
 see the comment on the node for how to refresh it.
 
-## Networking: XU (DEUNA) over a virtual ESP32 bridge
+## Networking: XU (DEUNA)
 
-The guest gets a real Ethernet interface — 2.11BSD sees a **DEUNA as `de0`**
-and pings across the LAN with 0% loss. Enabled by `have_xu_net` in
-`zynq_top.vhd` (set it to `0` and rebuild to drop networking cleanly without
-touching any wiring).
+The guest has a working Ethernet interface: 2.11BSD sees a DEUNA as `de0` and
+routes over the LAN at 0% packet loss. Controlled by `have_xu_net` in
+`zynq_top.vhd`; setting it to `0` and rebuilding removes networking without
+any other wiring change.
 
-The trick is that `xu.vhd` already contained a complete, working DEUNA that
-had never been switched on: a *second, embedded* PDP-11 core (`cpu0`/`mmu0`
-with its own console and line clock on a private local unibus) running real
-pre-assembled DEUNA microcode. That microcode implements PCSR0-3,
-GETPCBB/GETCMD/PDMD and the descriptor rings already. Upstream it talks to a
-physical ESP32 over bit-banged SPI; all this project adds is
-`core/xuaxi.vhd`, which keeps that microcode's exact XF/RT/RL/SRDY register
-contract but replaces the SPI half with an AXI-Lite bridge to `pdp11-hostd`
-on the PS, which shuttles frames to a Linux `tap0` bridged with `eth0`.
+### Implementation
 
-So there is no DEUNA protocol or ring-walking logic in this repo at all —
-only a byte-buffer shuttle. `docs/xu-networking-plan.md` has the full
-writeup: register map, wire framing, the diagnostic registers, the two bugs
-that had to be fixed, and the theories that turned out wrong.
+`xu.vhd` (from the upstream pdp2011 core) already contained a complete DEUNA
+implementation that had never been enabled: a second, embedded PDP-11 core
+(`cpu0`/`mmu0`, with its own console and line clock on a private local
+unibus) executing pre-assembled DEUNA microcode. That microcode implements
+PCSR0-3, GETPCBB/GETCMD/PDMD and the descriptor rings.
 
-### Using it
+Upstream, that microcode drives a physical ESP32 over bit-banged SPI. This
+project replaces only the SPI half: `core/xuaxi.vhd` presents the microcode's
+existing XF/RT/RL/SRDY register contract unchanged, and bridges it over
+AXI-Lite to `pdp11-hostd` on the PS, which moves frames to and from a Linux
+`tap0` joined to `br0` alongside `eth0`.
 
-On the guest, once booted:
+Consequently the repository contains no DEUNA protocol or descriptor-ring
+logic — only a byte-buffer shuttle and the ESP32 wire framing.
+`docs/xu-networking-plan.md` documents the register map, wire framing,
+diagnostic registers, the two defects found during bring-up, and the
+hypotheses that were tested and refuted.
+
+### Configuration
+
+`pdp11-hostd` creates `tap0`, joins it to `br0` with `eth0`, and moves the
+board's DHCP lease to the bridge, making the guest a directly addressable
+host on the LAN. On the guest:
 
 ```
 ifconfig de0 192.168.10.99 netmask 255.255.255.0 up
 ping 192.168.10.185
 ```
 
-`pdp11-hostd` creates `tap0`, joins it to `br0` alongside `eth0`, and moves
-the board's DHCP lease onto the bridge, so the guest is a first-class host on
-your LAN. From the PS side, `tcpdump -i tap0` or `-i br0` shows the traffic.
+On the PS side, `tcpdump -i tap0` or `-i br0` shows guest traffic.
 
-### Two things that will look like bugs and aren't
+### Expected behaviour
 
-**Ping always reports exactly 16.667 ms.** That is not transit time — on the
-wire the reply comes back in ~90 µs. It's the guest's own 60 Hz line clock:
-2.11BSD measures RTT in whole ticks and a tick *is* 16.667 ms, and it defers
-received-packet processing to software-interrupt level which runs in step
-with that tick. Measured from Linux at a ping interval that isn't a whole
-number of ticks, the true figure is ~7 ms, nearly all of it the PDP-11 CPU
-running its own IP stack. Full derivation in the networking doc.
+**Round-trip times are reported as exactly 16.667 ms.** This is the guest's
+60 Hz line-clock period, not transit time; the reply returns on the wire in
+approximately 90 µs. 2.11BSD measures RTT in whole clock ticks and defers
+received-packet processing to software-interrupt level, which runs in step
+with the same tick. Measured from Linux at a ping interval that is not a
+whole number of ticks, the actual figure is ~7 ms, predominantly the PDP-11
+executing its own IP stack.
 
-**The daemon filters broadcast.** A real DEUNA passes all broadcast, but on a
-modern LAN that floods the guest's 6-entry receive ring with ARP for other
-hosts, mDNS and SSDP. `pdp11-hostd` accepts unicast-to-us always, and
-broadcast only for ARP actually targeting the guest — whose IP it learns by
-snooping the guest's own transmits, so there's nothing to configure. The
-`/status` endpoint reports what it accepted and dropped.
+**Broadcast traffic is filtered.** A real DEUNA accepts all broadcast; on a
+contemporary LAN that fills the guest's six-entry receive ring with ARP for
+other hosts, mDNS and SSDP. `pdp11-hostd` accepts unicast addressed to the
+guest, and broadcast only for ARP targeting the guest's own address, which it
+learns by inspecting the guest's outbound traffic. No configuration is
+required. Accept and drop counts are reported by the `/status` endpoint.
 
 ## Auto-boot ROM: rk/rl/rp fallover
 
