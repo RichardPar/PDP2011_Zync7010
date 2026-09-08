@@ -102,6 +102,25 @@ the counters the daemon already keeps:
 * **DEUNA / XU0** - RUN, DMA, XMIT, RECV, CARRIER and DROP lamps, log-scaled
   frame-rate meters, the station-address plate (MAC, tap device, the guest
   IP learned by snooping, PCSR0 in octal) and the frame/byte/drop counters.
+
+  **RUN means the guest is driving the device**, not that xu0 is powered.
+  It follows `run_start` (RUNSTATS), which only advances when the microcode
+  runs a DMA cycle for a driver - and `run_idle_ms`, how long since it last
+  moved. It deliberately does *not* follow the heartbeat: HEARTBEAT
+  free-runs in xu0's own clock domain whenever the fabric is up, so a lamp
+  driven from it sits lit next to `run_start = 0`, which is precisely the
+  state worth seeing. The rack header spells the same thing out - `no driver
+  started`, `driver quiet`, or `driver active`.
+
+  This matters for reading `RX Q FULL`. Nothing pops the receive ring except
+  `serve_net()`, which only runs when the core raises a request. With no
+  guest driver the 32-entry queue fills once and stays full, and every frame
+  the filter admits after that lands on `rx_drop_qfull` - so a steadily
+  climbing count there, alongside `no driver started`, means frames are
+  arriving for a guest that isn't listening, not that anything is broken.
+  (The filter admits broadcast at all in that state because `guest_ip` is
+  only learned by snooping the guest's own transmits, and it fails open
+  until it knows - see the receive-filter section above.)
 * **Console strip** - a 16-lamp register showing the last sector address in
   octal, plus LINK/DISK/NET/ERR.
 * **Event log** - mounts, unmounts, resets and I/O errors as they happen.

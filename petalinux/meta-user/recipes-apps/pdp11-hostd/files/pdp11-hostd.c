@@ -225,6 +225,17 @@ typedef struct {
    uint32_t heartbeat_last;
    uint64_t heartbeat_last_change_ms;
    int      heartbeat_alive;
+
+   /*
+    * Whether the GUEST is actually driving the device, which is a different
+    * question from whether xu0 is alive. HEARTBEAT free-runs in xu0's clock
+    * domain whenever the fabric is powered, so it says nothing about the
+    * PDP-11 side; RUNSTATS' start counter only advances when the microcode
+    * runs a DMA cycle for a driver. Tracked here so the panel can tell
+    * "no driver has ever touched this" from "driver present but quiet".
+    */
+   uint32_t run_start_last;
+   uint64_t run_last_change_ms;     /* 0 = never seen it move */
 } net_t;
 
 static net_t g_net = {
@@ -983,6 +994,7 @@ static void build_panel_json(char *b, size_t n)
             "\"mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\",\"ip\":\"%u.%u.%u.%u\","
             "\"hb\":%u,\"hb_alive\":%s,\"hb_age_ms\":%lld,"
             "\"dma_state\":%u,\"run_start\":%u,\"run_done\":%u,"
+            "\"run_idle_ms\":%lld,"
             "\"pcsr0\":%u,\"ifetch\":%u,"
             "\"tx_frames\":%lu,\"tx_bytes\":%llu,\"tx_pps\":%.1f,\"tx_idle_ms\":%lld,"
             "\"rx_frames\":%lu,\"rx_bytes\":%llu,\"rx_pps\":%.1f,\"rx_idle_ms\":%lld,"
@@ -994,6 +1006,7 @@ static void build_panel_json(char *b, size_t n)
             g_net.heartbeat_last, g_net.heartbeat_alive ? "true" : "false",
             age_ms(g_net.heartbeat_last_change_ms),
             debug1 & 0x7, runstats & 0xffff, (runstats >> 16) & 0xffff,
+            age_ms(g_net.run_last_change_ms),
             debug2 & 0xffff, debug3 & 0xffff,
             tx_written, (unsigned long long)net_tx_bytes, g_tx_pps,
             age_ms(net_last_tx_ms),
@@ -2058,6 +2071,14 @@ static void *heartbeat_thread(void *arg)
         hb = n->regs[NET_REG_HEARTBEAT];
         now = now_ms();
         was_alive = n->heartbeat_alive;
+
+        {
+            uint32_t rs = n->regs[NET_REG_RUNSTATS] & 0xffff;
+            if (rs != n->run_start_last) {
+                n->run_start_last = rs;
+                n->run_last_change_ms = now;
+            }
+        }
 
         if (hb != n->heartbeat_last) {
             n->heartbeat_last = hb;

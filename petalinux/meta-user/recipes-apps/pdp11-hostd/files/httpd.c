@@ -236,7 +236,15 @@ static int ws_send_frame(httpd_conn_t *c, int opcode, const void *p, size_t n)
     return rc;
 }
 
-/* Read exactly n bytes. 0 = ok, -1 = closed/error/timeout. */
+/*
+ * Read exactly n bytes. 0 = ok, -1 = closed/error.
+ *
+ * EAGAIN is a wait, not a failure: SO_RCVTIMEO is set on every connection
+ * for HTTP keep-alive, and treating its expiry as an error tore down idle
+ * WebSockets - a browser holding one open sends nothing at all, so the
+ * timeout fired every HTTPD_IDLE_SEC and the client reconnected, forever.
+ * serve_websocket() also clears the timeout, so this is belt and braces.
+ */
 static int read_all(int fd, void *p, size_t n)
 {
     uint8_t *b = (uint8_t *)p;
@@ -244,6 +252,7 @@ static int read_all(int fd, void *p, size_t n)
         ssize_t r = recv(fd, b, n, 0);
         if (r < 0) {
             if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
             return -1;
         }
         if (r == 0) return -1;
@@ -516,6 +525,15 @@ static void serve_websocket(httpd_conn_t *c, const char *key)
         "Connection: Upgrade\r\n"
         "Sec-WebSocket-Accept: %s\r\n\r\n", accept);
     if (write_all(c, resp, (size_t)rn) < 0) return;
+
+    /* A WebSocket is long-lived and may be silent for hours; the keep-alive
+     * read timeout has no meaning here. A dead peer is still detected by the
+     * broadcaster, whose sends carry HTTPD_SEND_SEC and close on failure. */
+    {
+        struct timeval z;
+        z.tv_sec = 0; z.tv_usec = 0;
+        setsockopt(c->fd, SOL_SOCKET, SO_RCVTIMEO, &z, sizeof(z));
+    }
 
     payload = (uint8_t *)malloc(HTTPD_WS_MAX + 1);
     if (!payload) return;

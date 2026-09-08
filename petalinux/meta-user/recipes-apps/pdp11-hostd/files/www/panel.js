@@ -426,15 +426,39 @@ const linkLamp = lampIn(document, 'link');
 
 let netPrev = null;
 
+/*
+ * RUN means "the guest is driving this device" - NOT "xu0 is powered".
+ *
+ * It used to follow heartbeat_alive, which is the free-running counter in
+ * xu0's own clock domain: alive whenever the fabric is up, whether or not
+ * anything on the PDP-11 side has ever touched the DEUNA. So RUN sat lit
+ * next to run_start = 0, while the receive ring filled with broadcast that
+ * nothing was draining and rx_drop_qfull climbed for hours. The lamp was
+ * hiding exactly the condition it should have been showing.
+ *
+ * run_start only advances when the microcode runs a DMA cycle for a driver,
+ * so that - not the heartbeat - is what RUN reflects now.
+ */
+const RUN_IDLE_MS = 2500;   /* an active driver cycles far faster than this */
+
+function driverState(n) {
+  if (!n.present)            return { run: false, text: 'no UIO device — built without have_xu_net?' };
+  if (!n.hb_alive)           return { run: false, text: 'xu0 heartbeat stalled' };
+  if (!n.run_start)          return { run: false, text: 'xu0 idle · no driver started' };
+  if (n.run_idle_ms < 0 ||
+      n.run_idle_ms >= RUN_IDLE_MS)
+                             return { run: false, text: 'xu0 idle · driver quiet' };
+  return { run: true, text: 'xu0 · driver active' };
+}
+
 function updateNet(n) {
   const rack = $('#rack-net');
+  const st = driverState(n);
   rack.classList.toggle('absent', !n.present);
   lampSet(lampIn(document, 'net-online'), n.present);
-  $('#net-stat').textContent = n.present
-    ? (n.hb_alive ? 'xu0 running' : 'xu0 heartbeat stalled')
-    : 'no UIO device — built without have_xu_net?';
+  $('#net-stat').textContent = st.text;
 
-  lampSet(lampIn(document, 'n-run'),  n.present && n.hb_alive);
+  lampSet(lampIn(document, 'n-run'), st.run);
   lampSet(lampIn(document, 'n-carr'), n.present && !!n.if);
   lampSet(lampIn(document, 'n-dma'),  n.present && n.dma_state !== 0);
 
