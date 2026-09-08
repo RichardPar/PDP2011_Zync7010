@@ -85,8 +85,8 @@ case "${1:-}" in
       cd pdp2011_zynq_petalinux
 
       # --- apply the vendored customizations (recipes, device tree, kernel
-      # config) so a fresh project gets pdp11-diskd/tu58fs/picocom/pdp11-scripts,
-      # the reserved-memory node, the UIO node, etc. ---
+      # config) so a fresh project gets pdp11-hostd/tu58fs/picocom/pdp11-scripts,
+      # the reserved-memory node, the UIO nodes, etc. ---
       cp -rf /project/petalinux/meta-user/. project-spec/meta-user/
 
       petalinux-config --get-hw-description=/deploy --silentconfig
