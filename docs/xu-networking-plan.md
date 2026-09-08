@@ -341,7 +341,7 @@ whose microcode handler does `mov rdrbh,rcurrh / mov rdrbl,rcurrl`, resetting
 It is not transit time. On the wire, Linux answers in **90 µs**, and the
 bridge adds well under a millisecond. Three things stack up:
 
-- **~7.1 ms** is the guest itself — a PDP-11/44-class CPU running the
+- **~7.1 ms** is the guest itself — a PDP-11/70-class CPU running the
   2.11BSD IP stack. This is the irreducible floor.
 - **0–16.7 ms** waiting for the next 60 Hz tick, because BSD defers
   received-packet processing to software-interrupt level, which runs in step

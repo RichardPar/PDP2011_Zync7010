@@ -1,6 +1,6 @@
 ![PDP-11 on Zynq-7010](docs/pdp11-logo.svg)
 
-# PDP-11/44 on the QMTECH Zynq-7010 "Bajie" board
+# PDP-11/70 on the QMTECH Zynq-7010 "Bajie" board
 
 ## Why!
 I have always wanted a PDP11 for some reason - and this is the closest I can get
@@ -15,15 +15,21 @@ spark for wanting a real PDP-11 running again in the first place.
 
 ## Overview
 
-A port of the [pdp2011](https://pdp2011.sytse.net/) VHDL core (PDP-11/44,
-22-bit MMU) to a Zynq-7010. Main memory lives in the PS's DDR3, shared with a
-PetaLinux system running on the same chip. Part `xc7z010clg400-1`, toolchain
-Vivado 2023.2 + PetaLinux 2023.2.
+A port of the [pdp2011](https://pdp2011.sytse.net/) VHDL core (PDP-11/70,
+22-bit MMU, FP11 floating point) to a Zynq-7010. Main memory lives in the
+PS's DDR3, shared with a PetaLinux system running on the same chip. Part
+`xc7z010clg400-1`, toolchain Vivado 2023.2 + PetaLinux 2023.2.
+
+The model is set by `modelcode => 70` in `zynq_top.vhd` (it was 44 until
+2026-09-04, changed to match 2.11BSD's own `PDP11=70` assumption). The model
+code has knock-on effects rather than being cosmetic — most visibly
+`unibus.vhd` derives `have_rh70` from it, which puts the RH disk controller
+on its 22-bit DMA path.
 
 The board boots PetaLinux on the ARM cores and the PDP-11 side at the same
 time; the PDP-11 boots whatever's on the RL0/DB0 image currently loaded (see
 "Swapping disks without a reboot"). RT-11 V5.3, RSX-11, and 2.11BSD (over the
-RH11/RP06 bridge) have all booted on this board.
+RH70/RP06 bridge) have all booted on this board.
 
 Peripherals, and where each is documented:
 
@@ -32,11 +38,11 @@ Peripherals, and where each is documented:
 | KL11 `kl0` console | physical FPGA pins (P20/T19) | "Serial consoles and TU58" |
 | KL11 `kl1`-`kl3` | `axi_uartlite` ↔ Linux `/dev/ttyUL*` | "Serial consoles and TU58" |
 | RL11 disks (DL0-DL3) | image files on the PS over AXI | "File-backed RL disk" |
-| RH11/RP06 disk (DB0) | image file on the PS over AXI | "File-backed RH/RP06 disk" |
+| RH70/RP06 disk (DB0) | image file on the PS over AXI | "File-backed RH/RP06 disk" |
 | XU (DEUNA) Ethernet | Linux `tap0` bridged to `eth0` over AXI | "Networking" |
 | TU58 tape | `tu58fs` on the PS | "Serial consoles and TU58" |
 
-The RL11 and RH11 disks both started on a physical microSD (`sdspi.vhd`) and
+The RL11 and RH70 disks both started on a physical microSD (`sdspi.vhd`) and
 were later moved to image files served by the PS. All three PS-facing bridges
 (two disk, one network) share a single AXI-Lite expansion bus and are served
 by one daemon, `pdp11-hostd`.
@@ -159,7 +165,7 @@ or SD card don't come up.
 |---|---|---|
 | console tx | P20 | 9600 8N1, KL11 `kl0` |
 | console rx | T19 | |
-| SD MISO | N20 | idle/unused — RL11 and RH11/RP06 are both AXI file-backed now (see "File-backed RH/RP06 disk") |
+| SD MISO | N20 | idle/unused — RL11 and RH70/RP06 are both AXI file-backed now (see "File-backed RH/RP06 disk") |
 | SD CLK | R19 | idle/unused, same reason |
 | SD MOSI | T20 | idle/unused, same reason |
 | SD CS | V20 | idle/unused, same reason |
@@ -289,10 +295,11 @@ from its own image file** (`pdp11-hostd … /srv/pdp11/dl0.img /srv/pdp11/dl1.im
 files now, not one blob. Only two are usable anyway; DL2/DL3 hang the core (see
 "Not done").
 
-`rk11` is still wired to `sdspi.vhd` but off. `rh11` is now on as an RP06
-(`have_rh => 1`, `rh_type => 6`), served the same way as RL11 — its own
-`sddisk.vhd` AXI bridge, backed by an image file on the PS — see "File-backed
-RH/RP06 disk" below.
+`rk11` is still wired to `sdspi.vhd` but off. The RH controller (`rh11.vhd`)
+is on as an RP06 (`have_rh => 1`, `rh_type => 6`), served the same way as
+RL11 — its own `sddisk.vhd` AXI bridge, backed by an image file on the PS.
+Since `modelcode => 70` it runs as an RH70 rather than an RH11; see
+"File-backed RH/RP06 disk" below.
 
 ## Swapping disks without a reboot
 
@@ -300,7 +307,7 @@ RH/RP06 disk" below.
 image out of a unit and drop a different one in while RT-11/2.11BSD keeps
 running — swap between an RT-11 pack, a games pack, XXDP, an RP06 pack,
 whatever, without touching the board. Covers both busses, RL11 (DL0..DL3) and
-RH11/RP06 (DB0 only): `GET /status`, `GET /images` (what's in `/srv/pdp11`),
+RH70/RP06 (DB0 only): `GET /status`, `GET /images` (what's in `/srv/pdp11`),
 `POST /load?unit=<spec>&path=...`, `POST /unload?unit=<spec>`. `<spec>` is a
 bus+unit like `rl0`/`rh0`, or a bare number, which still means RL (`unit=1` ==
 DL1) for backward compatibility.
@@ -363,10 +370,18 @@ normal persisted state now, so that check is gone.)
 
 ## File-backed RH/RP06 disk
 
-RH11/RP06 (`DB:` at 0176700, vector 254) works the same way RL11 does: its
+RH/RP06 (`DB:` at 0176700, vector 254) works the same way RL11 does: its
 `sdspi` instance is swapped for its own **`sddisk.vhd`** (a second, separate
 instance of the same bridge — each disk gets one), backed by an image file on
-the PS via `pdp11-hostd`. RH11's sector is a native 512-byte/256-word block,
+the PS via `pdp11-hostd`.
+
+Because the core is an 11/70, this is an **RH70, not an RH11**:
+`unibus.vhd` derives `have_rh70 <= 1 when modelcode = 70`, which switches
+`rh11.vhd` onto its 22-bit `rh70_bus_master_*` DMA path (addressing all 4 MB
+directly) instead of the 18-bit Unibus-mapped one. Nothing to configure —
+it follows the model code.
+
+The sector is a native 512-byte/256-word block,
 so unlike the RL11 there's no 256→512 padding to undo. Lives at `0x43010000`
 on `M_AXI_GP0`, interrupt on `IRQ_F2P[4]`, same register map as the RL bridge
 above. The core only implements one RH drive — `rh11.vhd`'s busmaster logic
@@ -482,7 +497,7 @@ the MSB of whatever that row shows:
 | 0, col 3 | memory read happened | green, off if not |
 | 0, col 4 | memory write happened | red, off if not |
 | 0, col 5 | I/O-page access (dev read or write) | cyan, off if neither |
-| 0, col 6 | disk DMA | amber = RL11/RL02, magenta = RH11/RP06, off if neither |
+| 0, col 6 | disk DMA | amber = RL11/RL02, magenta = RH70/RP06, off if neither |
 | 0, col 7 | panel heartbeat | white, blinks at 1 Hz - if this isn't blinking, clk50mhz itself is dead |
 | 1–3 | 22-bit unibus ADDRESS register | amber, MSB first |
 | 4–5 | 16-bit DATA register (last write, else last read) | green |
@@ -535,5 +550,5 @@ outside this tree (default `../.petalinux-docker/work`, overridable).
 
 On (`have_fp => 1` in `zynq_top.vhd`). It was forced off on the earlier build
 to save space, but the 7010 doesn't notice — the whole design lands around
-39 % of the LUTs with the FPU in, and still makes timing. An 11/44 ships with
+39 % of the LUTs with the FPU in, and still makes timing. An 11/70 ships with
 an FP11 anyway, so this just stops forcing it off.
