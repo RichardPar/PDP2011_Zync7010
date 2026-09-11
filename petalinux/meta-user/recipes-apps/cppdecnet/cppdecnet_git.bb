@@ -11,16 +11,19 @@ address assigned first, so write ${sysconfdir}/decnet/node.conf and run \
 'decnetd /etc/decnet/node.conf' by hand."
 HOMEPAGE = "https://github.com/RichardPar/cppdecnet"
 
-# The port carries PyDECnet's own license.
+# BSD-3-Clause both ways: the port author's own copyright and terms, with
+# PyDECnet's original copyright and licence retained below them as its terms
+# require. The checksum tracks that combined file - "License text changes"
+# (9e741f5) is what added the first half, and moved this md5.
 LICENSE = "BSD-3-Clause"
-LIC_FILES_CHKSUM = "file://LICENSE;md5=35bff0a7dd87ae6fb60fc975bd56669c"
+LIC_FILES_CHKSUM = "file://LICENSE;md5=e18f311f9d6c52732ea76452acd01040"
 
 SRC_URI = "git://github.com/RichardPar/cppdecnet.git;protocol=https;branch=main \
            file://0001-logging-fall-back-to-fmtlib-when-libstdc-has-no-forma.patch \
            file://decnetd.init \
            file://decnetd.service"
-# 2ff4bb3: "SNAPSHOT - I cant say it works!"
-SRCREV = "2ff4bb330e44e97b98d2ce4117a1cb948c6f638c"
+# 3a79cfd: "ddcmp over serial"
+SRCREV = "3a79cfd0a6f98bdc502b1b0f17fe0792663bfb24"
 PV = "0.1.0+git${SRCPV}"
 S = "${WORKDIR}/git"
 
