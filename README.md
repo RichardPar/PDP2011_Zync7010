@@ -47,7 +47,7 @@ by one daemon, `pdp11-hostd`.
 
 Everything is built by the top-level **`./build.sh`** — bitstream, then the full
 PetaLinux (kernel, rootfs, `BOOT.BIN`), including the rootfs apps `pdp11-hostd`,
-`tu58fs`, `picocom`, and `pdp11-scripts`. Every artifact lands flat in `deploy/`:
+`tu58fs`, `cppdecnet`, `picocom`, and `pdp11-scripts`. Every artifact lands flat in `deploy/`:
 
 | File | From |
 |---|---|
@@ -109,6 +109,10 @@ In `project-spec/meta-user`:
   network bridge's tap device).
 - `pdp11-hostd` recipe — the daemon serving both disk bridges and the network
   bridge, plus `dlctl` for the runtime disk-swap API.
+- `cppdecnet` recipe — a DECnet node on the PS, with a patch swapping
+  `std::format` for fmtlib (GCC 12.2 has no `<format>`), plus `decnetd.init`
+  (S91, after `pdp11-hostd` creates `br0`) and a `decnetd.service` unit for if
+  the distro ever moves to systemd.
 - UIO nodes in `system-user.dtsi` for each PS-facing bridge: `disk_uio`,
   `rh_disk_uio`, `net_uio`.
 - rootfs on the SD's ext4 partition (`root=/dev/mmcblk0p2`), not initrd.
@@ -203,6 +207,46 @@ the `ttyUL*` ports to give the PDP-11 a `DD:` tape. `picocom` is also included
 for talking to the ports. Both are recipes under the PetaLinux project;
 `tu58fs` is a pinned-commit git recipe with a Makefile override so it
 cross-compiles for ARM.
+
+## DECnet on the PS
+
+`cppdecnet` ([github.com/RichardPar/cppdecnet](https://github.com/RichardPar/cppdecnet)),
+a C++ port of Paul Koning's PyDECnet, is in the rootfs: routing (endnode, level
+1 and level 2), NSP, session control, MOP and event logging, over Multinet
+(TCP/UDP) or Ethernet (UDP frames, TAP, pcap). It gives the PS its own DECnet
+node on the same LAN the PDP-11 reaches through the XU bridge, so the guest has
+something to talk DECnet to without a second machine.
+
+It installs `decnetd` and `dnping` (~745 KB), and the sample configurations —
+PyDECnet's syntax, unchanged — in `/etc/decnet/samples`.
+
+It auto-starts from `/etc/init.d/decnetd` (this image is SysV — busybox init,
+no systemctl; the `/lib/systemd` directory on the board is udev's compat
+leftovers). A `decnetd.service` unit ships too, but only gets installed if the
+distro ever gains systemd. The start slot is **S91**, deliberately after
+`S90pdp11-hostd`: `br0` is not in `/etc/network/interfaces` — `pdp11-hostd`
+creates it at runtime, bridging `eth0` with the PDP-11's `tap0` — so the init
+script also waits (up to 20 s) for the circuit's interface to appear before
+starting. It stops at **K09**, before `K10pdp11-hostd`, so the circuit closes
+while the bridge still exists.
+
+The config itself is *not* shipped: a DECnet node needs its own area/node
+address, and two nodes claiming one address is worse than not being on the
+segment at all. Without `/etc/decnet/node.conf` the init script says so and
+exits 0. Copy one from `/etc/decnet/samples` and edit it.
+
+`libpcap` is in the rootfs alongside it, so a `circuit … Ethernet pcap:<iface>`
+line reaches a real segment. The kernel needs nothing extra — `CONFIG_PACKET=y`
+is already in the base zynq config — but capturing and injecting frames needs
+`CAP_NET_RAW`, so run `decnetd` as root. Phase IV derives a station's Ethernet
+address from its node number, which the circuit uses as its source while
+capturing promiscuously; that works on a switched segment but not on wifi.
+
+The recipe is a pinned-commit git recipe like `tu58fs`, with one patch: the
+tree's deferred logging uses `std::format`, which libstdc++ only ships from GCC
+13, and PetaLinux 2023.2 cross-compiles with GCC 12.2. The patch falls back to
+fmtlib — the library `std::format` was standardised from — selected
+automatically on `__cpp_lib_format`, so a GCC 13+ host build is unaffected.
 
 RT-11 as shipped prints "No multi-terminal support", so `TT1:`–`TT3:` aren't
 serviced by the OS yet — that needs a SYSGEN'd multi-terminal monitor (see "Not

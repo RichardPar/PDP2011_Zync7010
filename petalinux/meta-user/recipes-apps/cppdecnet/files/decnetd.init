@@ -1,0 +1,83 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          decnetd
+# Required-Start:    $local_fs $network
+# Required-Stop:     $local_fs $network
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: cppdecnet DECnet Phase IV node
+### END INIT INFO
+
+DAEMON=/usr/bin/decnetd
+CONFIG=/etc/decnet/node.conf
+LOG=/var/log/decnetd.log
+LEVEL=info
+
+# How long to wait for a pcap circuit's interface to exist. This matters:
+# br0 is NOT in /etc/network/interfaces. pdp11-hostd creates it at runtime -
+# it makes the bridge, moves eth0 into it and re-acquires a DHCP lease on it
+# (see "creating br0" in pdp11-hostd.c) - so at our start slot it can still
+# be a second or two away. The loop normally falls through immediately; it
+# only ever costs the full wait when something is actually wrong.
+WAIT=20
+
+running () { ps 2>/dev/null | grep -q '[u]sr/bin/decnetd'; }
+
+case "$1" in
+  start)
+    # The config is deliberately not shipped by the package. A DECnet node
+    # needs its own area/node address, and picking one unattended is worse
+    # than not being on the segment at all - two nodes claiming one address
+    # break each other. Copy one from /etc/decnet/samples and edit it.
+    if [ ! -f "$CONFIG" ]; then
+      echo "decnetd: no $CONFIG - not starting (see /etc/decnet/samples)"
+      exit 0
+    fi
+    if running; then
+      echo "decnetd: already running - not starting a second node"
+      exit 0
+    fi
+
+    # Only a pcap circuit is tied to a named interface; udp: and tap: are not.
+    IFACE=$(sed -n 's/^[^#]*[Pp]cap:\([A-Za-z0-9_.:-]*\).*/\1/p' "$CONFIG" | head -1)
+    if [ -n "$IFACE" ]; then
+      i=0
+      while [ ! -e "/sys/class/net/$IFACE" ] && [ "$i" -lt "$WAIT" ]; do
+        i=$((i + 1))
+        sleep 1
+      done
+      if [ ! -e "/sys/class/net/$IFACE" ]; then
+        echo "decnetd: $IFACE did not appear within ${WAIT}s - not starting"
+        exit 0
+      fi
+      [ "$i" -gt 0 ] && echo "decnetd: waited ${i}s for $IFACE"
+    fi
+
+    echo "Starting decnetd ($CONFIG${IFACE:+, circuit on $IFACE})"
+    nohup "$DAEMON" --log-level "$LEVEL" -e "$LOG" "$CONFIG" >/dev/null 2>&1 &
+    ;;
+  stop)
+    echo "Stopping decnetd"
+    # SIGTERM is enough: the daemon logs "caught signal 15, shutting down" and
+    # unwinds its layers cleanly, closing the pcap handle on the way out.
+    for p in $(ps | grep '[u]sr/bin/decnetd' | awk '{print $1}'); do kill "$p"; done
+    ;;
+  restart)
+    "$0" stop
+    sleep 1
+    "$0" start
+    ;;
+  status)
+    if running; then
+      echo "decnetd running"
+    else
+      echo "decnetd not running"
+      exit 3
+    fi
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart|status}"
+    exit 1
+    ;;
+esac
+exit 0

@@ -256,8 +256,19 @@ static volatile uint32_t guest_ip = 0;
 
 /* RX filter/queue stats, for judging whether the guest is being buried in
  * noise and whether we are ever having to drop on our own side. */
-static volatile unsigned long rx_acc_unicast, rx_acc_bcast,
+static volatile unsigned long rx_acc_unicast, rx_acc_bcast, rx_acc_mcast,
                               rx_drop_bcast, rx_drop_other, rx_drop_qfull;
+
+/* -F: hand the guest EVERY frame off tap0, bypassing the address filter.
+ * Purely a diagnostic - it answers "is the filter what is stopping this
+ * traffic?" without a rebuild. Note what it costs: tap0 is a bridge member,
+ * so the guest then gets the LAN's full broadcast/multicast racket, and its
+ * handful of receive descriptors are exactly what that starves (measured
+ * here: an ARP flood at ~2/s was enough to make DECnet adjacencies flap).
+ * rx_acc_promisc counts the frames that ONLY got through because of this,
+ * so the normal drop counters still say what the filter would have done. */
+static int rx_filter_off = 0;
+static volatile unsigned long rx_acc_promisc;
 
 /* TX queue stats (defined here for build_status_json above the queue). */
 static volatile unsigned long tx_enq, tx_written, tx_drop_qfull;
@@ -276,8 +287,41 @@ static volatile uint64_t           net_last_tx_ms, net_last_rx_ms;
  * then adopts via its own FC_RDPHYAD probe. 08-00-2b is DEC's real
  * registered IEEE OUI - a fitting, non-colliding choice for a virtual
  * DEUNA, and the same convention the earlier from-scratch attempt used
- * (see memory [[xu-ethernet-bridge]]) before pdp11-espd. */
-static const uint8_t xu_mac[6] = { 0x08, 0x00, 0x2b, 0x11, 0x22, 0x33 };
+ * (see memory [[xu-ethernet-bridge]]) before pdp11-espd.
+ *
+ * NOT const: this is the default the guest starts life with, not a fixed
+ * property of the interface. A real DEUNA's address is rewritten by the
+ * host with FC_WRTPHYAD, and DECnet *always* does so - Phase IV derives
+ * the station address from the node number as AA-00-04-00-<lo>-<hi> and
+ * every peer then addresses the node there. We have no path back from the
+ * guest's FC_WRTPHYAD (xubw.mac only ever reads the address out of the
+ * rx_buf header), so instead learn_station_mac() below picks the new
+ * address off the source field of what the guest transmits. Without that,
+ * DECnet traffic leaves fine but every reply comes back to an address the
+ * RX filter has never heard of. Same relaxed-atomicity argument as
+ * guest_ip - the writer is serve_net's thread, the readers are rx_thread
+ * and the HTTP thread, and the worst case of catching a half-updated copy
+ * is one frame filtered against the wrong address. */
+static uint8_t xu_mac[6] = { 0x08, 0x00, 0x2b, 0x11, 0x22, 0x33 };
+
+/* The guest's DECnet Phase IV address, AA-00-04-00-<lo>-<hi>, or all-zero
+ * until we have seen it claim one. Real hardware would BE this address:
+ * DECnet rewrites the station address with FC_WRTPHYAD, and every peer then
+ * addresses the node there rather than at its ROM address. Our guest's
+ * driver cannot (xu.vhd has no path for it - observed on the wire: RSX node
+ * 1.19 keeps transmitting from the 08-00-2b address we handed it, while its
+ * hellos advertise 1.19 and the router therefore replies to
+ * aa:00:04:00:13:04). So rather than change the station address underneath a
+ * running driver - the microcode latches it out of the rx_buf header, and
+ * the IP stack is using it - we simply accept BOTH: the ROM address and the
+ * DECnet one. A DEUNA programmed by DECnet ends up receiving on exactly this
+ * address, so nothing reaches the guest that would not have on real iron. */
+static uint8_t dec_mac[6];
+
+/* Set when the guest's own hello says it is a level-1 router (FLAGS 0x0b)
+ * rather than an endnode (0x0d). Decides whether the all-routers multicast
+ * is any of its business - see rx_addressed_to_us(). */
+static int dec_is_router;
 
 static const char *img_dir = "/srv/pdp11";   /* GET /images lists *.img here    */
 static int    http_port = 8080;          /* HTTP/WS port; -p N, -p 0 disables   */
@@ -708,7 +752,10 @@ static void build_status_json(char *b, size_t n)
             "\"cpu_npr\":%s,\"cpu_npg\":%s,"
             "\"ifetch_count\":%u,\"xubm_run_count\":%u,"
             "\"guest_ip\":\"%u.%u.%u.%u\","
+            "\"dec_mac\":\"%02x:%02x:%02x:%02x:%02x:%02x\","
+            "\"rx_filter\":\"%s\",\"rx_acc_promisc\":%lu,"
             "\"rx_acc_unicast\":%lu,\"rx_acc_bcast\":%lu,"
+            "\"rx_acc_mcast\":%lu,"
             "\"rx_drop_bcast\":%lu,\"rx_drop_other\":%lu,"
             "\"rx_drop_qfull\":%lu,"
             "\"tx_enq\":%lu,\"tx_written\":%lu,\"tx_drop_qfull\":%lu}",
@@ -728,7 +775,11 @@ static void build_status_json(char *b, size_t n)
             debug3 & 0xffff, (debug3 >> 16) & 0xffff,
             (guest_ip >> 24) & 0xff, (guest_ip >> 16) & 0xff,
             (guest_ip >> 8) & 0xff, guest_ip & 0xff,
-            rx_acc_unicast, rx_acc_bcast, rx_drop_bcast, rx_drop_other,
+            dec_mac[0], dec_mac[1], dec_mac[2],
+            dec_mac[3], dec_mac[4], dec_mac[5],
+            rx_filter_off ? "off" : "on", rx_acc_promisc,
+            rx_acc_unicast, rx_acc_bcast, rx_acc_mcast,
+            rx_drop_bcast, rx_drop_other,
             rx_drop_qfull, tx_enq, tx_written, tx_drop_qfull);
     }
     snprintf(b + o, n - o, "}\n");
@@ -998,6 +1049,7 @@ static void build_panel_json(char *b, size_t n)
             "\"pcsr0\":%u,\"ifetch\":%u,"
             "\"tx_frames\":%lu,\"tx_bytes\":%llu,\"tx_pps\":%.1f,\"tx_idle_ms\":%lld,"
             "\"rx_frames\":%lu,\"rx_bytes\":%llu,\"rx_pps\":%.1f,\"rx_idle_ms\":%lld,"
+            "\"rx_mcast\":%lu,"
             "\"drops\":{\"bcast\":%lu,\"other\":%lu,\"rxq\":%lu,\"txq\":%lu}}",
             g_net.present ? "true" : "false", g_net.ifname,
             xu_mac[0], xu_mac[1], xu_mac[2], xu_mac[3], xu_mac[4], xu_mac[5],
@@ -1011,7 +1063,7 @@ static void build_panel_json(char *b, size_t n)
             tx_written, (unsigned long long)net_tx_bytes, g_tx_pps,
             age_ms(net_last_tx_ms),
             net_rx_deliv, (unsigned long long)net_rx_bytes, g_rx_pps,
-            age_ms(net_last_rx_ms),
+            age_ms(net_last_rx_ms), rx_acc_mcast,
             rx_drop_bcast, rx_drop_other, rx_drop_qfull, tx_drop_qfull);
     }
 
@@ -1835,6 +1887,111 @@ static void learn_guest_ip(const uint8_t *buf, int len)
     }
 }
 
+/* Adopt the source address of a frame the guest transmitted as our station
+ * address - see the xu_mac comment for why this stands in for FC_WRTPHYAD.
+ * Individual addresses only: a group bit in the source field is malformed,
+ * and the all-zero address is what a half-initialised driver emits. */
+static void learn_station_mac(const uint8_t *buf, int len)
+{
+    static const uint8_t zero[6] = { 0, 0, 0, 0, 0, 0 };
+
+    if (len < 12) return;
+    if (buf[6] & 0x01) return;                       /* group bit set */
+    if (memcmp(buf + 6, zero, 6) == 0) return;
+    if (memcmp(buf + 6, xu_mac, 6) == 0) return;     /* unchanged */
+
+    log_msg("NET: station address now %02x:%02x:%02x:%02x:%02x:%02x "
+            "(was %02x:%02x:%02x:%02x:%02x:%02x, learned from guest TX)",
+            buf[6], buf[7], buf[8], buf[9], buf[10], buf[11],
+            xu_mac[0], xu_mac[1], xu_mac[2], xu_mac[3], xu_mac[4], xu_mac[5]);
+    memcpy(xu_mac, buf + 6, 6);
+}
+
+/* Pull that address out of a DECnet routing-layer hello the guest transmits.
+ * The hello's ID field carries the sender's own AA-00-04-00-xx-yy regardless
+ * of the source address on the wire, which is precisely the mismatch we are
+ * papering over. Layout after the 0x6003 ethertype, confirmed against a
+ * capture of this LAN's own router and of RSX node 1.19:
+ *
+ *   router : 1b 00 | 0b | 02 00 00 | aa 00 04 00 14 04
+ *   endnode: 22 00 | 81 | 0d | 02 00 00 | aa 00 04 00 13 04
+ *
+ * i.e. a 2-byte little-endian data length, then an OPTIONAL padding field
+ * (0x80 set in the first byte, low 7 bits = its total length - the endnode
+ * above pads by one), then FLAGS (0x0b router hello, 0x0d endnode hello),
+ * TIVER (3), then the 6-byte ID. */
+static void learn_decnet_mac(const uint8_t *buf, int len)
+{
+    int o = 16;                     /* past ethertype and the length field */
+
+    if (len < 18 || buf[12] != 0x60 || buf[13] != 0x03) return;
+    if (o < len && (buf[o] & 0x80)) o += buf[o] & 0x7f;     /* skip padding */
+    if (o >= len) return;
+    if (buf[o] != 0x0b && buf[o] != 0x0d) return;           /* not a hello */
+    dec_is_router = (buf[o] == 0x0b);
+    o += 4;                                                 /* FLAGS + TIVER */
+    if (o + 6 > len) return;
+
+    /* Only ever adopt a genuine Phase IV address, never whatever happens to
+     * sit at that offset in a message we misparsed. */
+    if (buf[o] != 0xaa || buf[o+1] != 0x00 ||
+        buf[o+2] != 0x04 || buf[o+3] != 0x00) return;
+    if (memcmp(buf + o, dec_mac, 6) == 0) return;           /* unchanged */
+
+    log_msg("NET: guest DECnet address %02x:%02x:%02x:%02x:%02x:%02x "
+            "(node %u.%u) - now also accepted on RX",
+            buf[o], buf[o+1], buf[o+2], buf[o+3], buf[o+4], buf[o+5],
+            (buf[o+5] >> 2) & 0x3f,
+            ((unsigned)(buf[o+5] & 0x03) << 8) | buf[o+4]);
+    memcpy(dec_mac, buf + o, 6);
+}
+
+/* Has the guest claimed a DECnet address? Doubles as "this guest is doing
+ * DECnet", which is what the ARP fail-open below needs to know. */
+static int dec_mac_known(void)
+{
+    static const uint8_t zero[6] = { 0, 0, 0, 0, 0, 0 };
+    return memcmp(dec_mac, zero, 6) != 0;
+}
+
+/* DEC's own multicast blocks: AB-00-00-xx (DNA - MOP dump/load 01, MOP
+ * remote console 02, Phase IV end-node hello 03, router hello 04), AB-00-03
+ * and AB-00-04 (LAT), and the 09-00-2B assignment (LAT, LanBridge, and
+ * friends). DECnet's whole adjacency mechanism lives in here - hellos are
+ * multicast, never unicast or broadcast - so a filter that drops multicast
+ * wholesale means a node that transmits happily and is never reachable. */
+static int is_dec_multicast(const uint8_t *buf)
+{
+    if (buf[0] == 0xab && buf[1] == 0x00) {
+        /* AB-00-00-03-00-00 is "all routers" and AB-00-00-04-00-00 is
+         * "all end nodes" - that way round. An endnode's DEUNA has the
+         * all-end-nodes address in its multicast list and NOT all-routers,
+         * so all-routers is the one to drop here: delivering it just burns
+         * a receive descriptor on a frame RSX has to throw away - and
+         * descriptors are exactly what this guest is short of: xubw.mac's
+         * pktin discards whatever arrives while the ring has none free
+         * ("bit #100000,rdre+4 / beq 80$"). Measured on the wire, the
+         * router sends to both groups every cycle, so this is still half
+         * the DECnet traffic we were handing the guest.
+         *
+         * This test used to check for 0x04, which had it exactly backwards:
+         * it dropped the router hellos an endnode needs in order to adopt a
+         * designated router, so the guest sat at "rtr 0.0" forever no matter
+         * what was on the segment. Fixed 2026-09-10 after cppdecnet came up
+         * as an L1 router on br0, saw BAJI and declared the adjacency up,
+         * while BAJI never saw us at all. The two addresses are named in
+         * cppdecnet's src/datalink/bc.cc (all_routers/all_endnodes) and in
+         * its samples/pcap-router.conf, and the wire agrees: BAJI, an
+         * endnode, sends its own hello to AB-00-00-03-00-00. */
+        if (buf[2] == 0x00 && buf[3] == 0x03 &&
+            buf[4] == 0x00 && buf[5] == 0x00 && !dec_is_router)
+            return 0;
+        return 1;
+    }
+    if (buf[0] == 0x09 && buf[1] == 0x00 && buf[2] == 0x2b) return 1;
+    return 0;
+}
+
 /* Address filtering, as a real DEUNA does in hardware - our own address or
  * broadcast - but TIGHTENED for a modern LAN. tap0 is a bridge member, so it
  * sees the full broadcast/multicast racket (ARP for every other host, mDNS,
@@ -1846,17 +2003,39 @@ static void learn_guest_ip(const uint8_t *buf, int len)
  * So: unicast to us is always accepted; broadcast is accepted only when it
  * is an ARP actually asking about the guest's own IP. Until we have learned
  * that IP we accept all ARP (fail open), otherwise the guest could never be
- * resolved in the first place. Non-ARP broadcast is dropped outright. */
-static int rx_addressed_to_us(const uint8_t *buf, int len)
+ * resolved in the first place. Non-ARP broadcast is dropped outright.
+ *
+ * The fail-open needs an exit, though, or it never closes for a guest that
+ * simply does not speak IP - and a DECnet-only RSX is exactly that. Measured
+ * on hardware: node 1.19 was being handed 60 ARP broadcasts per 30s against
+ * 6 router hellos, i.e. 91% of its receive descriptors went to ARP for other
+ * hosts, and the hellos only landed when a buffer happened to be free. The
+ * adjacency it did form expired 30s later, on the endnode listen timer, and
+ * DECnet connections timed out. So once the guest has claimed a DECnet
+ * address it has told us what it is, and unmatched ARP goes back to being
+ * dropped like any other broadcast.
+ *
+ * Multicast is where the tightening has to stop: the racket that motivated
+ * it is IP multicast (01-00-5e-xx mDNS/SSDP, 33-33-xx IPv6 ND), while the
+ * DEC blocks above carry DECnet's and LAT's own control traffic and are
+ * quiet on any normal LAN. So DEC multicast is accepted and everything
+ * else with the group bit set is dropped, which is also roughly what a
+ * DEUNA programmed with DECnet's multicast list would do in hardware. */
+static int rx_filter_decide(const uint8_t *buf, int len)
 {
     if (len < 6) return 0;
     if (memcmp(buf, xu_mac, 6) == 0) { rx_acc_unicast++; return 1; }
+    if ((buf[0] & 0x01) == 0 && memcmp(buf, dec_mac, 6) == 0) {
+        rx_acc_unicast++;               /* the guest's DECnet address */
+        return 1;
+    }
 
     if (memcmp(buf, "\xff\xff\xff\xff\xff\xff", 6) == 0) {
         if (len >= 14 && buf[12] == 0x08 && buf[13] == 0x06) {      /* ARP */
             uint32_t gip = guest_ip;
             /* target protocol address sits at offset 38 */
-            if (gip == 0 || len < 42 || rd_be32(buf + 38) == gip) {
+            if ((gip == 0 && !dec_mac_known()) ||
+                len < 42 || rd_be32(buf + 38) == gip) {
                 rx_acc_bcast++;
                 return 1;
             }
@@ -1865,7 +2044,23 @@ static int rx_addressed_to_us(const uint8_t *buf, int len)
         return 0;
     }
 
+    if (buf[0] & 0x01) {                                    /* multicast */
+        if (is_dec_multicast(buf)) { rx_acc_mcast++; return 1; }
+        rx_drop_other++;
+        return 0;
+    }
+
     rx_drop_other++;
+    return 0;
+}
+
+/* The filter proper, plus the -F escape hatch. The decision is always made
+ * (and counted) so the stats keep describing what the filter would have
+ * done; -F only changes what we do with a "no". */
+static int rx_addressed_to_us(const uint8_t *buf, int len)
+{
+    if (rx_filter_decide(buf, len)) return 1;
+    if (rx_filter_off) { rx_acc_promisc++; return 1; }
     return 0;
 }
 
@@ -2167,6 +2362,8 @@ static void *serve_net(void *arg)
                  * thread owes the core a prompt DONE, and tap0 must never
                  * be allowed to stall the run engine. */
                 txq_push(txbytes + HDRLEN, framelen);
+                learn_station_mac(txbytes + HDRLEN, framelen);
+                learn_decnet_mac(txbytes + HDRLEN, framelen);
                 learn_guest_ip(txbytes + HDRLEN, framelen);
                 if (verbose)
                     log_msg("NET: TX: %d bytes queued for %s", framelen, n->ifname);
@@ -2244,12 +2441,15 @@ int main(int argc, char **argv)
     int hb_thread_started = 0;
     int tx_thread_started = 0;
     static const char *usage =
-        "usage: pdp11-hostd [-v] [-s] [-r] [-d] [-p <port>] [-D <imgdir>] "
+        "usage: pdp11-hostd [-v] [-s] [-r] [-d] [-F] [-p <port>] [-D <imgdir>] "
         "[-c <configfile>] [-R <rh0-image>] [-i <tap-ifname>] [-W <wwwdir>] "
         "[-T <tu58-port>] "
         "[-l <logfile>] [<dl0-image> [<dl1-image> ...]]\n"
         "  -R <img>    initial image for the RH0 (RP06) drive (seed only)\n"
         "  -i <ifn>    tap device name for the network bridge (default tap0)\n"
+        "  -F          disable the RX address filter - deliver every frame\n"
+        "              off tap0 to the guest (diagnostic; floods it with\n"
+        "              LAN broadcast/multicast)\n"
         "  -p <port>   web panel + REST API port (default 8080; 0 to disable)\n"
         "  -D <dir>    directory that GET /images lists (default /srv/pdp11)\n"
         "  -W <dir>    serve the panel's assets from <dir> instead of the\n"
@@ -2267,6 +2467,7 @@ int main(int argc, char **argv)
 
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-v") == 0) verbose = 1;
+        else if (strcmp(argv[i], "-F") == 0) rx_filter_off = 1;
         else if (strcmp(argv[i], "-s") == 0) swap = 1;
         else if (strcmp(argv[i], "-r") == 0) do_reset = 1;
         else if (strcmp(argv[i], "-l") == 0 && i + 1 < argc) logpath = argv[++i];
@@ -2295,6 +2496,9 @@ int main(int argc, char **argv)
     setvbuf(logfp, NULL, _IOLBF, 0);
     log_msg("=== pdp11-hostd starting (pid %d) ===", (int)getpid());
     log_msg("verbose = %d, log = %s, config = %s", verbose, logpath, config_path);
+    if (rx_filter_off)
+        log_msg("NET: -F given: RX address filter DISABLED - every frame on "
+                "%s goes to the guest", g_net.ifname);
 
     signal(SIGTERM, on_term);
     signal(SIGINT, on_term);

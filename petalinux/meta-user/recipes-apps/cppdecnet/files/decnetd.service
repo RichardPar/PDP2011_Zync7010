@@ -1,0 +1,26 @@
+[Unit]
+Description=cppdecnet DECnet Phase IV node
+Documentation=https://github.com/RichardPar/cppdecnet
+# br0 is created at runtime by pdp11-hostd - it bridges eth0 with the PDP-11's
+# tap0 and re-acquires DHCP on it - rather than by the network configuration,
+# so ordering after network-online.target alone is not enough. Under a systemd
+# image pdp11-hostd's SysV script is wrapped by systemd-sysv-generator, which
+# is what makes pdp11-hostd.service a valid ordering target here.
+After=network.target pdp11-hostd.service
+Wants=network.target
+# The config is site-specific and deliberately not shipped: a DECnet node needs
+# its own area/node address. Without one, stay down rather than guess.
+ConditionPathExists=/etc/decnet/node.conf
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/decnetd --log-level info -e /var/log/decnetd.log /etc/decnet/node.conf
+# SIGTERM unwinds the stack cleanly ("caught signal 15, shutting down") and
+# closes the pcap handle; give it room before resorting to SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

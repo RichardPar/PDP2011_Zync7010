@@ -1,0 +1,68 @@
+From: Richard Parsons <tuxbox.guru@gmail.com>
+Date: Wed, 10 Sep 2026 20:45:00 +0100
+Subject: [PATCH] logging: fall back to fmtlib when libstdc++ has no <format>
+
+std::format only reached libstdc++ in GCC 13.  PetaLinux 2023.2 is Yocto
+langdale, whose cross toolchain is GCC 12.2 and ships no <format> header
+at all, so the whole tree fails to compile at the first include.
+
+<format> is used in exactly one place -- the deferred formatting in
+decnet/common/logging.h -- and fmtlib is the library std::format was
+standardised from, with the same format(), the same format_string<> and
+the same "{}" grammar, so the fallback is a namespace swap.  Selected
+automatically on __cpp_lib_format, which keeps a GCC 13+ host build on
+std::format and needing no fmtlib at all; -DDN_USE_FMTLIB forces it.
+
+Verified both ways against fmt 9.1.0 (the version meta-oe carries):
+release build clean with no new warnings, and samples/endnode.conf comes
+up with byte-identical log lines.
+
+Upstream-Status: Pending [sent to github.com/RichardPar/cppdecnet]
+
+diff --git a/include/decnet/common/logging.h b/include/decnet/common/logging.h
+index 9b6dbd9..5802774 100644
+--- a/include/decnet/common/logging.h
++++ b/include/decnet/common/logging.h
+@@ -8,9 +8,25 @@
+ #ifndef DECNET_COMMON_LOGGING_H
+ #define DECNET_COMMON_LOGGING_H
+ 
+-#include <format>
++// PORT: std::format only reached libstdc++ in GCC 13.  PetaLinux 2023.2
++// (Yocto langdale) cross-compiles with GCC 12.2, whose libstdc++ has no
++// <format> at all, so fall back to fmtlib -- the library std::format was
++// standardised from, with the same format(), the same format_string<> and
++// the same "{}" grammar.  Define DN_USE_FMTLIB to force the fallback on a
++// toolchain that does have <format>.
++#include <version>
++
++#if defined(DN_USE_FMTLIB) || !defined(__cpp_lib_format)
++#  include <fmt/format.h>
++#  define DN_FORMAT_NS ::fmt
++#else
++#  include <format>
++#  define DN_FORMAT_NS ::std
++#endif
++
+ #include <string>
+ #include <string_view>
++#include <utility>
+ 
+ namespace decnet::logging {
+ 
+@@ -39,11 +55,13 @@ void set_thread_name (std::string name);
+ // The one function that actually writes; the macros below format first.
+ void emit (Level l, std::string_view msg) noexcept;
+ 
++// The parameter is named `f` rather than `fmt` so that it cannot shadow the
++// fmt namespace in the fallback build.
+ template <typename... A>
+-void log (Level l, std::format_string<A...> fmt, A &&...args)
++void log (Level l, DN_FORMAT_NS::format_string<A...> f, A &&...args)
+ {
+     if (enabled (l))
+-        emit (l, std::format (fmt, std::forward<A> (args)...));
++        emit (l, DN_FORMAT_NS::format (f, std::forward<A> (args)...));
+ }
+ 
+ }   // namespace decnet::logging
